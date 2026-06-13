@@ -1,16 +1,13 @@
 // src/worker.js
-// wpspot 메인 Cloudflare Worker.
-// - 정적 파일(public/): Cloudflare Pages/Assets로 서빙
-// - /api/*: D1 + KV 기반 REST API (회원가입/로그인 JWT, 계정 자격증명, 사이트 생성/프로비저닝)
-//
-// 외부 의존성 없이 Workers 표준 fetch + Web Crypto만 사용한다 (빠르고 에러 적음).
+// wpspot 메인 Cloudflare Worker
 
-import { signJWT, hashPassword, verifyPassword, getUserFromRequest } from "./auth.js";
+import { signJWT, verifyJWT, hashPassword, verifyPassword, getUserFromRequest } from "./auth.js";
 import { encryptSecret, decryptSecret } from "./crypto.js";
 import * as gh from "./github.js";
 import * as blogger from "./blogger.js";
 import * as cf from "./cf.js";
 import { generateUsername, generatePassword } from "./credentials.js";
+import { slugify, initWpSchema } from "./utils.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -27,6 +24,24 @@ function uid() {
   return crypto.randomUUID();
 }
 
+// KST 기준 다음날 자정 unix timestamp
+function kstMidnightTimestamp() {
+  const now = new Date();
+  // KST = UTC+9
+  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  kst.setUTCHours(15, 0, 0, 0); // UTC 15:00 = KST 다음날 00:00
+  if (kst.getTime() <= now.getTime()) {
+    kst.setUTCDate(kst.getUTCDate() + 1);
+  }
+  return Math.floor(kst.getTime() / 1000);
+}
+
+// 32자 hex 난수 생성
+function randomToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -36,9 +51,9 @@ export default {
       if (pathname.startsWith("/api/")) {
         return await handleApi(request, env, url);
       }
-      // 정적 자산 서빙 (public/)
       return env.ASSETS.fetch(request);
     } catch (e) {
+      console.error("Worker error:", e.message, e.stack);
       return err(`서버 오류: ${e.message}`, 500);
     }
   },
@@ -88,7 +103,7 @@ async function handleApi(request, env, url) {
   if (!authUser) return err("로그인이 필요합니다.", 401);
   const userId = authUser.sub;
 
-  // ---------- 계정: GCP/GitHub/Cloudflare 자격증명 ----------
+  // ---------- 계정 자격증명 ----------
   if (pathname === "/api/account/credentials" && method === "GET") {
     const row = await env.DB.prepare(
       "SELECT cf_account_email, cf_account_id, github_token_enc, gcp_blogger_token_enc, cf_global_api_key_enc FROM user_credentials WHERE user_id = ?"
@@ -140,7 +155,7 @@ async function handleApi(request, env, url) {
   // ---------- 사이트 목록 ----------
   if (pathname === "/api/sites" && method === "GET") {
     const { results } = await env.DB.prepare(
-      "SELECT id, site_name, blogger_blog_url, github_repo, cf_worker_url, status, wp_admin_path, created_at FROM sites WHERE user_id = ? ORDER BY created_at DESC"
+      "SELECT id, site_name, site_slug, blogger_blog_url, github_repo, cf_worker_url, status, wp_admin_path, created_at FROM sites WHERE user_id = ? ORDER BY created_at DESC"
     ).bind(userId).all();
     return json({ sites: results });
   }
@@ -149,18 +164,28 @@ async function handleApi(request, env, url) {
   if (pathname === "/api/sites" && method === "POST") {
     const body = await request.json().catch(() => ({}));
     const { siteName, bloggerBlogId } = body;
-    if (!siteName) return err("사이트 이름을 입력해주세요.");
-    if (!/^[a-z0-9-]{3,40}$/.test(siteName)) {
-      return err("사이트 이름은 영문 소문자, 숫자, 하이픈만 사용해 3~40자로 입력해주세요.");
+    if (!siteName || siteName.trim().length < 1) return err("사이트 이름을 입력해주세요.");
+    if (siteName.trim().length > 60) return err("사이트 이름은 60자 이하로 입력해주세요.");
+
+    // 한글/영어/숫자/공백/하이픈 허용. URL slug는 자동 변환
+    const siteSlug = slugify(siteName.trim());
+    if (siteSlug.length < 3) {
+      return err("사이트 이름이 너무 짧아요. 더 길게 입력해주세요.");
     }
+
+    // slug 중복 방지 (같은 사용자)
+    const existing = await env.DB.prepare(
+      "SELECT id FROM sites WHERE user_id = ? AND site_slug = ?"
+    ).bind(userId, siteSlug).first();
+    if (existing) return err("같은 이름의 사이트가 이미 있어요.");
 
     const id = uid();
     await env.DB.prepare(
-      `INSERT INTO sites (id, user_id, site_name, blogger_blog_id, status)
-       VALUES (?, ?, ?, ?, 'pending')`
-    ).bind(id, userId, siteName, bloggerBlogId || null).run();
+      `INSERT INTO sites (id, user_id, site_name, site_slug, blogger_blog_id, status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`
+    ).bind(id, userId, siteName.trim(), siteSlug, bloggerBlogId || null).run();
 
-    return json({ id, siteName, status: "pending" });
+    return json({ id, siteName: siteName.trim(), siteSlug, status: "pending" });
   }
 
   // ---------- 사이트 삭제 ----------
@@ -178,16 +203,26 @@ async function handleApi(request, env, url) {
         await gh.deleteRepo(token, owner, repo);
       }
     } catch (e) {
-      // 레포 삭제 실패해도 DB 레코드는 정리한다
+      // 레포 삭제 실패해도 DB는 정리
     }
 
+    // WP 스키마 데이터 정리
+    const wpTables = [
+      "wp_commentmeta", "wp_comments", "wp_term_relationships",
+      "wp_term_taxonomy", "wp_terms", "wp_postmeta", "wp_posts",
+      "wp_usermeta", "wp_users", "wp_options", "wp_links",
+    ];
+    for (const t of wpTables) {
+      await env.DB.prepare(`DELETE FROM ${t} WHERE site_id = ?`).bind(siteId).run().catch(() => {});
+    }
+    await env.DB.prepare("DELETE FROM phpmyadmin_tokens WHERE site_id = ?").bind(siteId).run().catch(() => {});
+    await env.DB.prepare("DELETE FROM site_credentials WHERE site_id = ?").bind(siteId).run().catch(() => {});
+    await env.DB.prepare("DELETE FROM site_jobs WHERE site_id = ?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM sites WHERE id = ?").bind(siteId).run();
     return json({ ok: true });
   }
 
   // ---------- 사이트 프로비저닝 ----------
-  // GitHub에 레포 생성 + 워드프레스 원본/Actions 워크플로우 업로드 + provision 워크플로우 실행
-  // + Cloudflare 프록시 워커 생성 + Blogspot 프록시 템플릿 적용
   const provisionMatch = pathname.match(/^\/api\/sites\/([^/]+)\/provision$/);
   if (provisionMatch && method === "POST") {
     const siteId = provisionMatch[1];
@@ -216,16 +251,17 @@ async function handleApi(request, env, url) {
 
       // 1) GitHub 레포 생성
       const ghUser = await gh.getAuthenticatedUser(githubToken);
-      const repoName = `wpspot-${site.site_name}`;
+      const repoName = `wpspot-${site.site_slug}`;
       await gh.createRepo(githubToken, repoName);
       const repoFullName = `${ghUser.login}/${repoName}`;
 
-      // 2) 워드프레스 원본 + Actions 워크플로우 업로드 (이 레포 .github/workflows/*.yml은
-      //    이 프로젝트의 .github/workflows를 그대로 복제 배포한다)
-      const provisionYml = await env.ASSETS.fetch(new URL("/_internal/workflows/provision.yml", request.url))
-        .then(r => r.ok ? r.text() : null).catch(() => null);
-      const syncYml = await env.ASSETS.fetch(new URL("/_internal/workflows/sync.yml", request.url))
-        .then(r => r.ok ? r.text() : null).catch(() => null);
+      // 2) 워크플로우 업로드
+      const [provisionYml, syncYml] = await Promise.all([
+        env.ASSETS.fetch(new URL("/_internal/workflows/provision.yml", "https://wpspot.app"))
+          .then(r => r.ok ? r.text() : null).catch(() => null),
+        env.ASSETS.fetch(new URL("/_internal/workflows/sync.yml", "https://wpspot.app"))
+          .then(r => r.ok ? r.text() : null).catch(() => null),
+      ]);
 
       if (provisionYml) {
         await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
@@ -234,23 +270,22 @@ async function handleApi(request, env, url) {
         await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
       }
 
-      // 3) provision 워크플로우 실행 (워드프레스 원본 + nginx/PHP-FPM 서버리스 환경 구성)
+      // 3) provision 워크플로우 실행
       if (provisionYml) {
         await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
-          site_name: site.site_name,
+          site_name: site.site_slug,
+          site_display_name: site.site_name,
         });
       }
 
-      // 4) Cloudflare 프록시 워커 배포 (사용자의 Cloudflare 계정에)
+      // 4) Cloudflare 프록시 워커 배포
       let accountId = cred.cf_account_id;
       if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
-      const workerName = `wpspot-${site.site_name}`;
-      // 워드프레스 오리진은 provision 워크플로우가 GitHub Pages/Actions로 배포할
-      // 정적 엔드포인트를 가리킨다 (Pages 기본 도메인 규칙: <repo>.pages.dev)
+      const workerName = `wpspot-${site.site_slug}`;
       const wpOrigin = `https://${repoName}.pages.dev`;
       const workerUrl = await cf.deployProxyWorker(cred.cf_account_email, cfKey, accountId, workerName, wpOrigin);
 
-      // 5) Blogspot 템플릿을 프록시 워커로 위임
+      // 5) Blogspot 템플릿 적용
       await blogger.setProxyTemplate(bloggerToken, site.blogger_blog_id, workerUrl);
       const blogInfo = await blogger.getBlog(bloggerToken, site.blogger_blog_id).catch(() => null);
 
@@ -263,7 +298,7 @@ async function handleApi(request, env, url) {
           .bind(accountId, userId).run();
       }
 
-      // ---- 호스팅 접속 정보 생성 (phpMyAdmin-lite / SFTP 대체 / nginx 상태) ----
+      // 6) 호스팅 접속 정보 생성
       const existingCred = await env.DB.prepare("SELECT site_id FROM site_credentials WHERE site_id = ?").bind(siteId).first();
       if (!existingCred) {
         const pmaUser = generateUsername();
@@ -285,12 +320,16 @@ async function handleApi(request, env, url) {
         await env.DB.prepare("UPDATE site_credentials SET nginx_status = 'ready' WHERE site_id = ?").bind(siteId).run();
       }
 
+      // 7) WordPress 기본 스키마 초기화
+      await initWpSchema(env.DB, siteId, site.site_name, workerUrl, blogInfo?.url || null);
+
       await env.DB.prepare(
         "UPDATE site_jobs SET status = 'success', message = ?, finished_at = strftime('%s','now') WHERE id = ?"
       ).bind("프로비저닝 완료", jobId).run();
 
       return json({ ok: true, workerUrl, githubRepo: repoFullName });
     } catch (e) {
+      console.error("Provision error:", e.message, e.stack);
       await env.DB.prepare("UPDATE sites SET status = 'error', updated_at = strftime('%s','now') WHERE id = ?")
         .bind(siteId).run();
       await env.DB.prepare(
@@ -300,7 +339,7 @@ async function handleApi(request, env, url) {
     }
   }
 
-  // ---------- 사이트 동기화 (워드프레스 → 깃허브/blogspot 재반영) ----------
+  // ---------- 사이트 동기화 ----------
   const syncMatch = pathname.match(/^\/api\/sites\/([^/]+)\/sync$/);
   if (syncMatch && method === "POST") {
     const siteId = syncMatch[1];
@@ -334,7 +373,101 @@ async function handleApi(request, env, url) {
     }
   }
 
-  // ---------- 호스팅 접속 정보 (phpMyAdmin-lite / SFTP 대체 / nginx 상태) ----------
+  // ---------- phpMyAdmin 토큰 발급/조회 ----------
+  // GET: 유효한 토큰 반환 (없으면 새로 발급)
+  const pmaTokenMatch = pathname.match(/^\/api\/sites\/([^/]+)\/pma-token$/);
+  if (pmaTokenMatch && method === "GET") {
+    const siteId = pmaTokenMatch[1];
+    const site = await env.DB.prepare("SELECT * FROM sites WHERE id = ? AND user_id = ?").bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+
+    const now = Math.floor(Date.now() / 1000);
+    // 만료된 토큰 정리
+    await env.DB.prepare("DELETE FROM phpmyadmin_tokens WHERE expires_at < ?").bind(now).run().catch(() => {});
+
+    let tokenRow = await env.DB.prepare(
+      "SELECT * FROM phpmyadmin_tokens WHERE site_id = ? AND expires_at > ?"
+    ).bind(siteId, now).first();
+
+    if (!tokenRow) {
+      const newToken = randomToken();
+      const expiresAt = kstMidnightTimestamp();
+      const id = uid();
+      await env.DB.prepare(
+        "INSERT INTO phpmyadmin_tokens (id, site_id, token, expires_at) VALUES (?, ?, ?, ?)"
+      ).bind(id, siteId, newToken, expiresAt).run();
+      tokenRow = { token: newToken, expires_at: expiresAt };
+    }
+
+    return json({
+      token: tokenRow.token,
+      url: `https://phpmyadmin.cloud-press.co.kr/${tokenRow.token}/`,
+      expiresAt: tokenRow.expires_at,
+    });
+  }
+
+  // ---------- phpMyAdmin 토큰 검증 (phpmyadmin 접속용) ----------
+  const pmaAuthMatch = pathname.match(/^\/api\/pma\/([^/]+)\/auth$/);
+  if (pmaAuthMatch && method === "POST") {
+    const token = pmaAuthMatch[1];
+    const body = await request.json().catch(() => ({}));
+    const { username, password } = body;
+
+    const now = Math.floor(Date.now() / 1000);
+    const tokenRow = await env.DB.prepare(
+      "SELECT * FROM phpmyadmin_tokens WHERE token = ? AND expires_at > ?"
+    ).bind(token, now).first();
+    if (!tokenRow) return err("접속 링크가 만료되었거나 유효하지 않아요. 새 링크를 발급해주세요.", 401);
+
+    const siteCred = await env.DB.prepare(
+      "SELECT * FROM site_credentials WHERE site_id = ?"
+    ).bind(tokenRow.site_id).first();
+    if (!siteCred) return err("사이트 자격증명을 찾을 수 없어요.", 404);
+
+    if (siteCred.phpmyadmin_username !== username) return err("아이디 또는 비밀번호가 올바르지 않아요.", 401);
+    const valid = await verifyPassword(password, siteCred.phpmyadmin_password_hash);
+    if (!valid) return err("아이디 또는 비밀번호가 올바르지 않아요.", 401);
+
+    // 임시 세션 토큰 발급
+    const pmaSessionToken = await signJWT(
+      { sub: tokenRow.site_id, pma: true },
+      env.JWT_SECRET,
+      3600 // 1시간
+    );
+    return json({ ok: true, sessionToken: pmaSessionToken, siteId: tokenRow.site_id });
+  }
+
+  // ---------- phpMyAdmin: WP 스키마 조회 ----------
+  const pmaTablesMatch = pathname.match(/^\/api\/pma\/tables$/);
+  if (pmaTablesMatch && method === "GET") {
+    // pma 세션 검증
+    const auth = request.headers.get("Authorization") || "";
+    const match = auth.match(/^Bearer\s+(.+)$/i);
+    if (!match) return err("인증이 필요해요.", 401);
+    const payload = await verifyJWT(match[1], env.JWT_SECRET);
+    if (!payload || !payload.pma) return err("phpMyAdmin 세션이 유효하지 않아요.", 401);
+    const siteId = payload.sub;
+
+    const wpTables = [
+      "wp_options", "wp_users", "wp_usermeta", "wp_posts", "wp_postmeta",
+      "wp_terms", "wp_term_taxonomy", "wp_term_relationships",
+      "wp_comments", "wp_commentmeta", "wp_links",
+    ];
+
+    const tableData = {};
+    for (const t of wpTables) {
+      try {
+        const { results } = await env.DB.prepare(`SELECT * FROM ${t} WHERE site_id = ? LIMIT 500`).bind(siteId).all();
+        tableData[t] = results;
+      } catch (e) {
+        tableData[t] = [];
+      }
+    }
+
+    return json({ tables: tableData });
+  }
+
+  // ---------- 호스팅 접속 정보 ----------
   const credInfoMatch = pathname.match(/^\/api\/sites\/([^/]+)\/credentials$/);
   if (credInfoMatch && method === "GET") {
     const siteId = credInfoMatch[1];
@@ -348,13 +481,31 @@ async function handleApi(request, env, url) {
       ? await decryptSecret(env, row.phpmyadmin_password_plain_enc)
       : null;
 
+    // phpMyAdmin 토큰 조회
+    const now = Math.floor(Date.now() / 1000);
+    let pmaToken = await env.DB.prepare(
+      "SELECT token FROM phpmyadmin_tokens WHERE site_id = ? AND expires_at > ?"
+    ).bind(siteId, now).first();
+
+    if (!pmaToken) {
+      const newToken = randomToken();
+      const expiresAt = kstMidnightTimestamp();
+      await env.DB.prepare(
+        "INSERT INTO phpmyadmin_tokens (id, site_id, token, expires_at) VALUES (?, ?, ?, ?)"
+      ).bind(uid(), siteId, newToken, expiresAt).run();
+      pmaToken = { token: newToken };
+    }
+
+    const pmaUrl = `https://phpmyadmin.cloud-press.co.kr/${pmaToken.token}/`;
+
     return json({
       provisioned: true,
       phpmyadmin: {
         username: row.phpmyadmin_username,
         password: pmaPassword,
-        url: `/phpmyadmin-lite.html?site=${siteId}`,
+        url: pmaUrl,
         dbPath: row.db_path,
+        note: "접속 링크는 매일 자정(KST) 초기화돼요.",
       },
       sftp: {
         username: row.sftp_username,
@@ -371,7 +522,7 @@ async function handleApi(request, env, url) {
     });
   }
 
-  // ---------- 파일 관리자 (SFTP 대체: GitHub Contents API) ----------
+  // ---------- 파일 관리자 ----------
   const filesMatch = pathname.match(/^\/api\/sites\/([^/]+)\/files$/);
   if (filesMatch) {
     const siteId = filesMatch[1];
@@ -394,32 +545,116 @@ async function handleApi(request, env, url) {
           items: data.map((it) => ({ name: it.name, path: it.path, type: it.type, size: it.size })),
         });
       }
-      return json({
-        type: "file",
-        path: data.path,
-        size: data.size,
-        encoding: data.encoding,
-        content: data.content, // base64
-      });
+      return json({ type: "file", path: data.path, size: data.size, encoding: data.encoding, content: data.content });
     }
 
     if (method === "PUT") {
       const body = await request.json().catch(() => ({}));
       const { path: filePath, content, message } = body;
       if (!filePath || content === undefined) return err("path와 content가 필요합니다.");
-      await gh.putFileBase64(githubToken, owner, repo, filePath, content, message || `chore: update ${filePath} via wpspot file manager`);
+      await gh.putFileBase64(githubToken, owner, repo, filePath, content, message || `chore: update ${filePath}`);
       return json({ ok: true });
     }
 
     if (method === "DELETE") {
       const filePath = url.searchParams.get("path");
       if (!filePath) return err("path가 필요합니다.");
-      await gh.deleteFile(githubToken, owner, repo, filePath, `chore: delete ${filePath} via wpspot file manager`);
+      await gh.deleteFile(githubToken, owner, repo, filePath, `chore: delete ${filePath}`);
       return json({ ok: true });
     }
   }
 
-  // ---------- phpMyAdmin-lite: 워드프레스 SQLite DB 읽기/쓰기 ----------
+  // ---------- WP 게시물 관리 (글/페이지 → Blogspot + GitHub 동시 저장) ----------
+  const postsMatch = pathname.match(/^\/api\/sites\/([^/]+)\/posts$/);
+  if (postsMatch) {
+    const siteId = postsMatch[1];
+    const site = await env.DB.prepare("SELECT * FROM sites WHERE id = ? AND user_id = ?").bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+
+    if (method === "GET") {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM wp_posts WHERE site_id = ? AND post_status != 'trash' ORDER BY post_date DESC LIMIT 100"
+      ).bind(siteId).all();
+      return json({ posts: results });
+    }
+
+    if (method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const { title, content, status = "publish", postType = "post" } = body;
+      if (!title) return err("제목을 입력해주세요.");
+
+      const cred = await env.DB.prepare("SELECT * FROM user_credentials WHERE user_id = ?").bind(userId).first();
+      const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+
+      // Blogspot에 게시물 생성 (콘텐츠 저장)
+      let bloggerPostId = null;
+      if (cred?.gcp_blogger_token_enc && site.blogger_blog_id) {
+        try {
+          const bloggerToken = await decryptSecret(env, cred.gcp_blogger_token_enc);
+          const post = await blogger.createPost(bloggerToken, site.blogger_blog_id, title, content || "");
+          bloggerPostId = post?.id || null;
+        } catch (e) {
+          // Blogspot 저장 실패해도 DB에는 저장
+        }
+      }
+
+      // GitHub에도 마크다운으로 저장
+      let githubPath = null;
+      if (cred?.github_token_enc && site.github_repo) {
+        try {
+          const githubToken = await decryptSecret(env, cred.github_token_enc);
+          const [owner, repo] = site.github_repo.split("/");
+          const slug = slugify(title);
+          const mdPath = `content/posts/${now.slice(0, 10)}-${slug}.md`;
+          const mdContent = `---\ntitle: "${title}"\ndate: "${now}"\nstatus: "${status}"\n---\n\n${content || ""}`;
+          await gh.putFile(githubToken, owner, repo, mdPath, mdContent, `post: ${title}`);
+          githubPath = mdPath;
+        } catch (e) {
+          // GitHub 저장 실패해도 계속
+        }
+      }
+
+      // wp_posts DB에 메타데이터 저장
+      const postSlug = slugify(title);
+      await env.DB.prepare(
+        `INSERT INTO wp_posts
+         (site_id, post_author, post_date, post_date_gmt, post_title, post_name,
+          post_status, post_type, blogger_post_id, github_path, post_modified, post_modified_gmt)
+         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(siteId, now, now, title, postSlug, status, postType, bloggerPostId, githubPath, now, now).run();
+
+      return json({ ok: true, bloggerPostId, githubPath });
+    }
+  }
+
+  // ---------- WP 옵션 (사이트 기본 정보) ----------
+  const optionsMatch = pathname.match(/^\/api\/sites\/([^/]+)\/options$/);
+  if (optionsMatch) {
+    const siteId = optionsMatch[1];
+    const site = await env.DB.prepare("SELECT * FROM sites WHERE id = ? AND user_id = ?").bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+
+    if (method === "GET") {
+      const { results } = await env.DB.prepare(
+        "SELECT option_name, option_value FROM wp_options WHERE site_id = ?"
+      ).bind(siteId).all();
+      const opts = {};
+      for (const r of results) opts[r.option_name] = r.option_value;
+      return json({ options: opts });
+    }
+
+    if (method === "PUT") {
+      const body = await request.json().catch(() => ({}));
+      for (const [k, v] of Object.entries(body)) {
+        await env.DB.prepare(
+          "INSERT INTO wp_options (site_id, option_name, option_value) VALUES (?, ?, ?) ON CONFLICT(site_id, option_name) DO UPDATE SET option_value = excluded.option_value"
+        ).bind(siteId, k, String(v)).run();
+      }
+      return json({ ok: true });
+    }
+  }
+
+  // ---------- database (레거시: SQLite 파일 직접 R/W) ----------
   const dbMatch = pathname.match(/^\/api\/sites\/([^/]+)\/database$/);
   if (dbMatch) {
     const siteId = dbMatch[1];
@@ -440,15 +675,15 @@ async function handleApi(request, env, url) {
         const data = await gh.getContents(githubToken, owner, repo, dbPath);
         return json({ path: dbPath, content: data.content, encoding: data.encoding, size: data.size });
       } catch (e) {
-        return err(`데이터베이스 파일을 찾을 수 없습니다 (${dbPath}). 프로비저닝이 끝났는지 확인해주세요.`, 404);
+        return err(`데이터베이스 파일을 찾을 수 없습니다 (${dbPath}).`, 404);
       }
     }
 
     if (method === "PUT") {
       const body = await request.json().catch(() => ({}));
-      const { content } = body; // base64 SQLite 파일 전체
+      const { content } = body;
       if (!content) return err("content(base64)가 필요합니다.");
-      await gh.putFileBase64(githubToken, owner, repo, dbPath, content, "chore: update wordpress.db via wpspot phpMyAdmin-lite");
+      await gh.putFileBase64(githubToken, owner, repo, dbPath, content, "chore: update wordpress.db via phpMyAdmin");
       return json({ ok: true });
     }
   }
