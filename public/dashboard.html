@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>대시보드 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__brand">wpspot</span>
+      <div class="row">
+        <a href="/account.html" class="btn btn--ghost btn--s">내 계정</a>
+        <button class="btn btn--ghost btn--s" id="logoutBtn">로그아웃</button>
+      </div>
+    </div>
+
+    <div class="screen">
+      <h1 class="h1 mt-2">내 사이트</h1>
+
+      <section class="section">
+        <div class="card">
+          <div class="title-1">새 사이트 만들기</div>
+          <form id="createForm" class="mt-2">
+            <div class="field">
+              <label class="field__label" for="siteName">사이트 이름</label>
+              <input class="field__input" type="text" id="siteName" placeholder="my-blog" pattern="[a-z0-9-]{3,40}" required />
+              <div class="field__help">영문 소문자, 숫자, 하이픈(-)만 사용해 3~40자로 입력해주세요.</div>
+            </div>
+            <div class="field">
+              <label class="field__label" for="bloggerBlogId">Blogspot Blog ID (선택)</label>
+              <input class="field__input" type="text" id="bloggerBlogId" placeholder="나중에 입력해도 돼요" />
+              <div class="field__help">Blogger 대시보드 &gt; 설정에서 확인할 수 있는 Blog ID예요. 프로비저닝 전에 입력해야 해요.</div>
+            </div>
+            <button type="submit" class="btn btn--secondary btn--l" id="createBtn">사이트 추가</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section__header">
+          <span class="title-1" style="margin:0;">사이트 목록</span>
+        </div>
+        <div id="siteList" class="card" style="padding: var(--space-2) var(--space-5);">
+          <div class="empty">불러오는 중...</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    if (wpspot.requireAuth()) {
+      loadSites();
+    }
+
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+      wpspot.clearSession();
+      window.location.href = "/login.html";
+    });
+
+    document.getElementById("createForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const createBtn = document.getElementById("createBtn");
+      createBtn.disabled = true;
+      createBtn.textContent = "추가 중...";
+
+      const siteName = document.getElementById("siteName").value.trim();
+      const bloggerBlogId = document.getElementById("bloggerBlogId").value.trim();
+
+      try {
+        await wpspot.api("/api/sites", {
+          method: "POST",
+          body: JSON.stringify({ siteName, bloggerBlogId }),
+        });
+        document.getElementById("createForm").reset();
+        wpspot.toast("사이트가 추가됐어요");
+        loadSites();
+      } catch (err) {
+        wpspot.toast(err.message);
+      } finally {
+        createBtn.disabled = false;
+        createBtn.textContent = "사이트 추가";
+      }
+    });
+
+    async function loadSites() {
+      const listEl = document.getElementById("siteList");
+      try {
+        const data = await wpspot.api("/api/sites");
+        const sites = data.sites || [];
+        if (!sites.length) {
+          listEl.innerHTML = `<div class="empty">아직 사이트가 없어요.<br/>위에서 첫 사이트를 추가해보세요.</div>`;
+          return;
+        }
+        listEl.innerHTML = sites.map(renderSite).join("");
+        sites.forEach(bindActions);
+      } catch (err) {
+        listEl.innerHTML = `<div class="empty">${wpspot.escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderSite(site) {
+      const sub = site.cf_worker_url || site.github_repo || "프로비저닝 전";
+      return `
+        <div class="list-row" data-id="${site.id}" data-status="${site.status}" data-name="${wpspot.escapeHtml(site.site_name)}">
+          <div class="list-row__main">
+            <span class="list-row__title">${wpspot.escapeHtml(site.site_name)}</span>
+            <span class="list-row__sub">${wpspot.escapeHtml(sub)}</span>
+          </div>
+          <div class="row">
+            ${wpspot.statusBadge(site.status)}
+          </div>
+        </div>
+        <div class="row" style="padding: 0 var(--space-2) var(--space-3);" data-actions="${site.id}">
+          <a class="btn btn--secondary btn--s" href="/hosting-info.html?site=${site.id}">호스팅 정보</a>
+          <button class="btn btn--secondary btn--s" data-action="provision" data-id="${site.id}">프로비저닝</button>
+          <button class="btn btn--secondary btn--s" data-action="sync" data-id="${site.id}">동기화</button>
+          <button class="btn btn--danger btn--s" data-action="delete" data-id="${site.id}">삭제</button>
+        </div>
+      `;
+    }
+
+    function bindActions(site) {
+      const wrap = document.querySelector(`[data-actions="${site.id}"]`);
+      if (!wrap) return;
+      wrap.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => handleAction(btn.dataset.action, site));
+      });
+    }
+
+    async function handleAction(action, site) {
+      if (action === "delete") {
+        if (!confirm(`'${site.site_name}' 사이트를 삭제할까요? 연결된 GitHub 레포도 함께 삭제돼요.`)) return;
+        try {
+          await wpspot.api(`/api/sites/${site.id}`, { method: "DELETE" });
+          wpspot.toast("삭제됐어요");
+          loadSites();
+        } catch (err) {
+          wpspot.toast(err.message);
+        }
+        return;
+      }
+
+      if (action === "provision" || action === "sync") {
+        const label = action === "provision" ? "프로비저닝" : "동기화";
+        try {
+          wpspot.toast(`${label}을 시작했어요`);
+          await wpspot.api(`/api/sites/${site.id}/${action}`, { method: "POST" });
+          wpspot.toast(`${label} 요청이 완료됐어요`);
+          loadSites();
+        } catch (err) {
+          wpspot.toast(err.message);
+          loadSites();
+        }
+      }
+    }
+  </script>
+</body>
+</html>

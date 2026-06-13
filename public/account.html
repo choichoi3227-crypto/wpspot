@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>내 계정 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__title">내 계정</span>
+      <a href="/dashboard.html" class="btn btn--ghost btn--s">대시보드</a>
+    </div>
+
+    <div class="screen">
+      <h1 class="h1 mt-2">연동 정보를<br/>입력해주세요</h1>
+      <p class="body-2">
+        아래 3가지 정보가 있어야 사이트를 만들 수 있어요. 한 번만 등록하면 모든 사이트에
+        공통으로 사용돼요.
+      </p>
+
+      <form id="credForm" class="mt-6">
+        <div class="section">
+          <div class="section__header">
+            <span class="title-1" style="margin:0;">GitHub Token</span>
+            <span id="ghStatus" class="caption"></span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="githubToken">Personal Access Token</label>
+            <input class="field__input" type="password" id="githubToken" placeholder="ghp_xxxxxxxxxxxxxxxx" autocomplete="off" />
+            <div class="field__help">repo, workflow 권한이 포함된 Fine-grained 또는 Classic PAT를 입력해주세요. 워드프레스 원본 레포 생성 및 GitHub Actions 실행에 사용돼요.</div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section__header">
+            <span class="title-1" style="margin:0;">GCP (Blogger API) Token</span>
+            <span id="gcpStatus" class="caption"></span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="gcpBloggerToken">OAuth Access / Refresh Token</label>
+            <input class="field__input" type="password" id="gcpBloggerToken" placeholder="ya29.xxxxxxxxxxxxxxxx" autocomplete="off" />
+            <div class="field__help">Blogger API 스코프(https://www.googleapis.com/auth/blogger)가 포함된 토큰을 입력해주세요. 블로그스팟 템플릿 연동에 사용돼요.</div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section__header">
+            <span class="title-1" style="margin:0;">Cloudflare Global API</span>
+            <span id="cfStatus" class="caption"></span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="cfAccountEmail">계정 이메일</label>
+            <input class="field__input" type="email" id="cfAccountEmail" placeholder="you@example.com" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="cfGlobalApiKey">Global API Key</label>
+            <input class="field__input" type="password" id="cfGlobalApiKey" placeholder="Cloudflare Global API Key" autocomplete="off" />
+            <div class="field__help">블로그스팟 프록시 워커를 내 클라우드플레어 계정에 생성하는 데 사용돼요. Cloudflare 대시보드 &gt; 프로필 &gt; API 토큰에서 확인할 수 있어요.</div>
+          </div>
+          <div class="field">
+            <label class="field__label" for="cfAccountId">Account ID (선택)</label>
+            <input class="field__input" type="text" id="cfAccountId" placeholder="비워두면 자동으로 조회해요" autocomplete="off" />
+          </div>
+        </div>
+
+        <div id="errorMsg" class="field__help is-error hidden mt-2"></div>
+      </form>
+    </div>
+
+    <div class="bottom-cta-wrap">
+      <button type="submit" form="credForm" class="btn btn--primary btn--xl" id="submitBtn">저장하기</button>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    if (wpspot.requireAuth()) {
+      load();
+    }
+
+    async function load() {
+      try {
+        const data = await wpspot.api("/api/account/credentials");
+        document.getElementById("ghStatus").textContent = data.hasGithubToken ? "등록됨" : "미등록";
+        document.getElementById("gcpStatus").textContent = data.hasGcpBloggerToken ? "등록됨" : "미등록";
+        document.getElementById("cfStatus").textContent = data.hasCfGlobalApiKey ? "등록됨" : "미등록";
+        if (data.cfAccountEmail) document.getElementById("cfAccountEmail").value = data.cfAccountEmail;
+        if (data.cfAccountId) document.getElementById("cfAccountId").value = data.cfAccountId;
+      } catch (err) {
+        wpspot.toast(err.message);
+      }
+    }
+
+    document.getElementById("credForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorMsg = document.getElementById("errorMsg");
+      errorMsg.classList.add("hidden");
+
+      const submitBtn = document.getElementById("submitBtn");
+      submitBtn.disabled = true;
+      submitBtn.textContent = "저장 중...";
+
+      const body = {
+        cfAccountEmail: document.getElementById("cfAccountEmail").value.trim(),
+        cfAccountId: document.getElementById("cfAccountId").value.trim(),
+      };
+      const gh = document.getElementById("githubToken").value.trim();
+      const gcp = document.getElementById("gcpBloggerToken").value.trim();
+      const cfKey = document.getElementById("cfGlobalApiKey").value.trim();
+      if (gh) body.githubToken = gh;
+      if (gcp) body.gcpBloggerToken = gcp;
+      if (cfKey) body.cfGlobalApiKey = cfKey;
+
+      try {
+        await wpspot.api("/api/account/credentials", {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+        wpspot.toast("저장됐어요");
+        document.getElementById("githubToken").value = "";
+        document.getElementById("gcpBloggerToken").value = "";
+        document.getElementById("cfGlobalApiKey").value = "";
+        load();
+      } catch (err) {
+        errorMsg.textContent = err.message;
+        errorMsg.classList.remove("hidden");
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "저장하기";
+      }
+    });
+  </script>
+</body>
+</html>

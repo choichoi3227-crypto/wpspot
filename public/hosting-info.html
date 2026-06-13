@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>호스팅 상세 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__title">호스팅 상세</span>
+      <a href="/dashboard.html" class="btn btn--ghost btn--s">대시보드</a>
+    </div>
+
+    <div class="screen">
+      <h1 class="h1 mt-2" id="siteTitle">호스팅 정보</h1>
+      <p class="caption" id="siteSub"></p>
+
+      <div id="content" class="mt-6">
+        <div class="empty">불러오는 중...</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    const siteId = new URLSearchParams(location.search).get("site");
+    if (wpspot.requireAuth()) load();
+
+    async function load() {
+      const content = document.getElementById("content");
+      if (!siteId) {
+        content.innerHTML = `<div class="empty">사이트 ID가 없어요.</div>`;
+        return;
+      }
+      try {
+        const sites = (await wpspot.api("/api/sites")).sites || [];
+        const site = sites.find((s) => s.id === siteId);
+        if (site) {
+          document.getElementById("siteTitle").textContent = site.site_name;
+          document.getElementById("siteSub").textContent = site.github_repo || "프로비저닝 전";
+        }
+
+        const data = await wpspot.api(`/api/sites/${siteId}/credentials`);
+        if (!data.provisioned) {
+          content.innerHTML = `<div class="empty">아직 프로비저닝되지 않았어요.<br/>대시보드에서 프로비저닝을 먼저 진행해주세요.</div>`;
+          return;
+        }
+        content.innerHTML = render(data);
+        bindCopyButtons();
+      } catch (e) {
+        content.innerHTML = `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function field(label, value, copy) {
+      return `
+        <div class="field">
+          <div class="field__label">${label}</div>
+          <div class="row">
+            <input class="field__input tabular" type="text" value="${wpspot.escapeHtml(value ?? "")}" readonly />
+            ${copy ? `<button class="btn btn--secondary btn--s" data-copy="${wpspot.escapeHtml(value ?? "")}">복사</button>` : ""}
+          </div>
+        </div>
+      `;
+    }
+
+    function render(data) {
+      return `
+        <section class="section">
+          <div class="section__header"><span class="title-1" style="margin:0;">phpMyAdmin (자체 제작 / 100% 서버리스)</span> ${wpspot.statusBadge("active")}</div>
+          <div class="card">
+            ${field("주소", data.phpmyadmin.url + " (클릭해서 이동)")}
+            ${field("아이디", data.phpmyadmin.username, true)}
+            ${field("비밀번호", data.phpmyadmin.password || "(최초 발급 시에만 표시돼요)", true)}
+            ${field("DB 경로 (레포 내)", data.phpmyadmin.dbPath)}
+            <a class="btn btn--primary btn--l" href="${data.phpmyadmin.url}">phpMyAdmin-lite 열기</a>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section__header"><span class="title-1" style="margin:0;">SFTP (GitHub API 대체)</span></div>
+          <div class="card">
+            ${field("연결 계정", data.sftp.username)}
+            ${field("루트 경로", data.sftp.root)}
+            ${field("레포지토리", data.sftp.repo)}
+            <p class="caption">${wpspot.escapeHtml(data.sftp.note)}</p>
+            <a class="btn btn--primary btn--l" href="${data.sftp.url}">파일 관리자 열기</a>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section__header"><span class="title-1" style="margin:0;">nginx + PHP (ephemeral 컨테이너)</span> ${wpspot.statusBadge(data.nginx.status === "ready" ? "active" : "pending")}</div>
+          <div class="card">
+            <p class="body-2">${wpspot.escapeHtml(data.nginx.engine)}</p>
+            ${field("프록시 워커 URL", data.nginx.workerUrl || "-", true)}
+            <p class="caption">매 프로비저닝/동기화 실행마다 새 GitHub Actions 컨테이너에서 nginx.conf와 PHP OPcache 설정이 재생성돼요.</p>
+          </div>
+        </section>
+      `;
+    }
+
+    function bindCopyButtons() {
+      document.querySelectorAll("[data-copy]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          navigator.clipboard?.writeText(btn.dataset.copy);
+          wpspot.toast("복사했어요");
+        });
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>phpMyAdmin-lite — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__title">phpMyAdmin-lite</span>
+      <a id="backLink" href="/dashboard.html" class="btn btn--ghost btn--s">호스팅</a>
+    </div>
+
+    <div class="screen">
+      <p class="caption">워드프레스 SQLite 데이터베이스(<span id="dbPathLabel"></span>)를 깃허브 레포에서 직접 읽고 씁니다.</p>
+
+      <div id="status" class="empty">불러오는 중...</div>
+
+      <div id="dbView" class="hidden">
+        <section class="section">
+          <div class="section__header"><span class="title-1" style="margin:0;">테이블</span></div>
+          <div id="tableList" class="card" style="padding: var(--space-2) var(--space-5);"></div>
+        </section>
+
+        <section class="section">
+          <div class="section__header"><span class="title-1" style="margin:0;">SQL 실행</span></div>
+          <div class="field">
+            <textarea class="field__input" id="sqlInput" rows="4" style="height:auto; padding: var(--space-3); font-family: monospace; font-size: 13px;" placeholder="SELECT * FROM wp_posts LIMIT 20;"></textarea>
+          </div>
+          <div class="row">
+            <button class="btn btn--primary btn--l" id="runBtn">실행</button>
+            <button class="btn btn--secondary btn--l" id="saveDbBtn">DB 파일 저장</button>
+          </div>
+          <p class="caption mt-2">SELECT는 즉시 조회되고, INSERT/UPDATE/DELETE는 메모리상 DB에 적용돼요. 변경 내용을 깃허브에 반영하려면 "DB 파일 저장"을 눌러주세요.</p>
+        </section>
+
+        <section class="section">
+          <div id="resultWrap"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+  <script src="/js/app.js"></script>
+  <script>
+    const siteId = new URLSearchParams(location.search).get("site");
+    let SQL, db, dbPath;
+
+    if (wpspot.requireAuth()) {
+      document.getElementById("backLink").href = `/hosting-info.html?site=${siteId}`;
+      init();
+    }
+
+    function base64ToBytes(b64) {
+      const bin = atob(b64.replace(/\n/g, ""));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    function bytesToBase64(bytes) {
+      let bin = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(bin);
+    }
+
+    async function init() {
+      const statusEl = document.getElementById("status");
+      try {
+        SQL = await initSqlJs({ locateFile: (f) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${f}` });
+
+        const cred = await wpspot.api(`/api/sites/${siteId}/credentials`);
+        if (!cred.provisioned) {
+          statusEl.textContent = "아직 프로비저닝되지 않았어요.";
+          return;
+        }
+        dbPath = cred.phpmyadmin.dbPath;
+        document.getElementById("dbPathLabel").textContent = dbPath;
+
+        const dbRes = await wpspot.api(`/api/sites/${siteId}/database`);
+        const bytes = base64ToBytes(dbRes.content);
+        db = new SQL.Database(bytes);
+
+        statusEl.classList.add("hidden");
+        document.getElementById("dbView").classList.remove("hidden");
+        listTables();
+      } catch (e) {
+        statusEl.textContent = e.message;
+      }
+    }
+
+    function listTables() {
+      const wrap = document.getElementById("tableList");
+      const res = db.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
+      if (!res.length) {
+        wrap.innerHTML = `<div class="empty">테이블이 없어요.</div>`;
+        return;
+      }
+      const names = res[0].values.map((r) => r[0]);
+      wrap.innerHTML = names.map((n) => `
+        <div class="list-row" data-table="${wpspot.escapeHtml(n)}">
+          <div class="list-row__main"><span class="list-row__title">${wpspot.escapeHtml(n)}</span></div>
+          <span class="caption">열기</span>
+        </div>
+      `).join("");
+      wrap.querySelectorAll("[data-table]").forEach((el) => {
+        el.addEventListener("click", () => runQuery(`SELECT * FROM ${el.dataset.table} LIMIT 50;`));
+      });
+    }
+
+    function runQuery(sql) {
+      document.getElementById("sqlInput").value = sql;
+      const resultWrap = document.getElementById("resultWrap");
+      try {
+        const res = db.exec(sql);
+        if (!res.length) {
+          resultWrap.innerHTML = `<div class="card">실행됐어요. 영향받은 행: ${db.getRowsModified()}</div>`;
+          listTables();
+          return;
+        }
+        const { columns, values } = res[0];
+        let html = `<div class="card" style="overflow-x:auto;"><table style="border-collapse:collapse; width:100%; font-size: var(--fs-body-3);">`;
+        html += `<tr>${columns.map((c) => `<th style="text-align:left; border-bottom:1px solid var(--border-secondary); padding:6px 8px;">${wpspot.escapeHtml(c)}</th>`).join("")}</tr>`;
+        for (const row of values) {
+          html += `<tr>${row.map((v) => `<td style="border-bottom:1px solid var(--border-secondary); padding:6px 8px; white-space:nowrap;">${wpspot.escapeHtml(v === null ? "NULL" : String(v))}</td>`).join("")}</tr>`;
+        }
+        html += `</table></div>`;
+        resultWrap.innerHTML = html;
+      } catch (e) {
+        resultWrap.innerHTML = `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    document.getElementById("runBtn").addEventListener("click", () => {
+      const sql = document.getElementById("sqlInput").value.trim();
+      if (sql) runQuery(sql);
+    });
+
+    document.getElementById("saveDbBtn").addEventListener("click", async () => {
+      try {
+        const bytes = db.export();
+        const base64 = bytesToBase64(bytes);
+        await wpspot.api(`/api/sites/${siteId}/database`, {
+          method: "PUT",
+          body: JSON.stringify({ content: base64 }),
+        });
+        wpspot.toast("DB 파일을 깃허브에 저장했어요");
+      } catch (e) {
+        wpspot.toast(e.message);
+      }
+    });
+  </script>
+</body>
+</html>
