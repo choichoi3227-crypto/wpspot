@@ -54,6 +54,18 @@
       }
     }
 
+    function maskedField(label, maskedValue, realValue, copyable) {
+      return `
+        <div class="field">
+          <div class="field__label">${label}</div>
+          <div class="row">
+            <input class="field__input tabular" type="text" value="${wpspot.escapeHtml(maskedValue ?? "")}" readonly id="field_${label.replace(/\s/g,'_')}" />
+            ${copyable ? `<button class="btn btn--secondary btn--s" data-copy="${wpspot.escapeHtml(realValue ?? "")}">복사</button>` : ""}
+          </div>
+        </div>
+      `;
+    }
+
     function field(label, value, copy) {
       return `
         <div class="field">
@@ -67,15 +79,56 @@
     }
 
     function render(data) {
+      const pma = data.phpmyadmin;
+      const pmaPass = pma.password || "";
+      const maskedPass = pmaPass ? "••••••••" : "(프로비저닝 후 표시)";
+
       return `
         <section class="section">
-          <div class="section__header"><span class="title-1" style="margin:0;">phpMyAdmin (자체 제작 / 100% 서버리스)</span> ${wpspot.statusBadge("active")}</div>
+          <div class="section__header">
+            <span class="title-1" style="margin:0;">phpMyAdmin</span>
+            ${wpspot.statusBadge("active")}
+          </div>
           <div class="card">
-            ${field("주소", data.phpmyadmin.url + " (클릭해서 이동)")}
-            ${field("아이디", data.phpmyadmin.username, true)}
-            ${field("비밀번호", data.phpmyadmin.password || "(최초 발급 시에만 표시돼요)", true)}
-            ${field("DB 경로 (레포 내)", data.phpmyadmin.dbPath)}
-            <a class="btn btn--primary btn--l" href="${data.phpmyadmin.url}">phpMyAdmin-lite 열기</a>
+            <div class="field">
+              <div class="field__label">접속 주소</div>
+              <div class="row">
+                <input class="field__input tabular" type="text" value="${wpspot.escapeHtml(pma.url)}" readonly />
+                <button class="btn btn--secondary btn--s" data-copy="${wpspot.escapeHtml(pma.url)}">복사</button>
+                <a class="btn btn--primary btn--s" href="${wpspot.escapeHtml(pma.url)}" target="_blank">열기</a>
+              </div>
+              <div class="field__help">${wpspot.escapeHtml(pma.note || "")}</div>
+            </div>
+            ${maskedField("아이디", pma.username, pma.username, true)}
+            ${maskedField("비밀번호", maskedPass, pmaPass, !!pmaPass)}
+            ${field("DB 경로 (레포 내)", pma.dbPath)}
+            <p class="caption mt-2">
+              📋 접속 방법: 위 주소로 이동 → 아이디/비밀번호 입력 → 로그인<br/>
+              🔒 접속 링크는 매일 자정(KST) 자동으로 초기화돼요. 새 링크는 이 페이지를 새로고침하면 확인할 수 있어요.
+            </p>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section__header">
+            <span class="title-1" style="margin:0;">스토리지 구성</span>
+          </div>
+          <div class="card">
+            <table style="width:100%; border-collapse:collapse; font-size: 0.875rem;">
+              <thead>
+                <tr style="border-bottom: 1px solid var(--color-border);">
+                  <th style="text-align:left; padding: 8px 4px; font-weight:600;">데이터 종류</th>
+                  <th style="text-align:left; padding: 8px 4px; font-weight:600;">저장 위치</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td style="padding:8px 4px;">글 / 페이지 (콘텐츠)</td><td style="padding:8px 4px;">Blogspot + GitHub 레포</td></tr>
+                <tr><td style="padding:8px 4px;">WP 설정 / 사용자 / 카테고리</td><td style="padding:8px 4px;">자체 phpMyAdmin (D1 DB)</td></tr>
+                <tr><td style="padding:8px 4px;">미디어 / 파일</td><td style="padding:8px 4px;">사용자 GitHub 레포</td></tr>
+                <tr><td style="padding:8px 4px;">테마 / 플러그인</td><td style="padding:8px 4px;">사용자 GitHub 레포</td></tr>
+                <tr><td style="padding:8px 4px;">사이트 기본 정보</td><td style="padding:8px 4px;">자체 phpMyAdmin (D1 DB)</td></tr>
+              </tbody>
+            </table>
           </div>
         </section>
 
@@ -91,11 +144,13 @@
         </section>
 
         <section class="section">
-          <div class="section__header"><span class="title-1" style="margin:0;">nginx + PHP (ephemeral 컨테이너)</span> ${wpspot.statusBadge(data.nginx.status === "ready" ? "active" : "pending")}</div>
+          <div class="section__header">
+            <span class="title-1" style="margin:0;">nginx + PHP (ephemeral 컨테이너)</span>
+            ${wpspot.statusBadge(data.nginx.status === "ready" ? "active" : "pending")}
+          </div>
           <div class="card">
             <p class="body-2">${wpspot.escapeHtml(data.nginx.engine)}</p>
             ${field("프록시 워커 URL", data.nginx.workerUrl || "-", true)}
-            <p class="caption">매 프로비저닝/동기화 실행마다 새 GitHub Actions 컨테이너에서 nginx.conf와 PHP OPcache 설정이 재생성돼요.</p>
           </div>
         </section>
       `;
@@ -104,7 +159,9 @@
     function bindCopyButtons() {
       document.querySelectorAll("[data-copy]").forEach((btn) => {
         btn.addEventListener("click", () => {
-          navigator.clipboard?.writeText(btn.dataset.copy);
+          const val = btn.dataset.copy;
+          if (!val || val === "(프로비저닝 후 표시)") { wpspot.toast("복사할 값이 없어요"); return; }
+          navigator.clipboard?.writeText(val);
           wpspot.toast("복사했어요");
         });
       });
