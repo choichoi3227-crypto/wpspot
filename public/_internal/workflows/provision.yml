@@ -1,0 +1,137 @@
+name: wpspot Provision
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_name:
+        description: "wpspot 사이트 이름"
+        required: true
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: PHP 설치 (8.3)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+          tools: composer, wp-cli
+
+      - name: 워드프레스 원본 다운로드
+        run: |
+          set -e
+          if [ ! -f wordpress/wp-load.php ]; then
+            curl -sSL https://wordpress.org/latest.tar.gz -o wp.tar.gz
+            tar -xzf wp.tar.gz
+            rm wp.tar.gz
+          fi
+
+      - name: SQLite 통합 플러그인 설치
+        run: |
+          set -e
+          cd wordpress
+          if [ ! -d wp-content/plugins/sqlite-database-integration ]; then
+            curl -sSL https://downloads.wordpress.org/plugin/sqlite-database-integration.latest-stable.zip -o sqlite.zip
+            unzip -q sqlite.zip -d wp-content/plugins/
+            rm sqlite.zip
+          fi
+          cp wp-content/plugins/sqlite-database-integration/db.copy wp-content/db.php
+
+      - name: wp-config.php 생성
+        run: |
+          set -e
+          cd wordpress
+          if [ ! -f wp-config.php ]; then
+            cp wp-config-sample.php wp-config.php
+            sed -i "/\\\$table_prefix/a define('DB_DIR', __DIR__ . '/wp-content/database/');\ndefine('DB_FILE', 'wordpress.db');" wp-config.php
+            mkdir -p wp-content/database
+            php -r "echo file_get_contents('https://api.wordpress.org/secret-key/1.1/salt/');" >> wp-config.php || true
+          fi
+
+      - name: WordPress 코어 설치 (WP-CLI)
+        run: |
+          set -e
+          cd wordpress
+          if [ ! -f wp-content/database/wordpress.db ]; then
+            wp core install \
+              --url="https://${{ inputs.site_name }}.example" \
+              --title="${{ inputs.site_name }}" \
+              --admin_user="admin" \
+              --admin_password="$(openssl rand -base64 12)" \
+              --admin_email="admin@${{ inputs.site_name }}.example" \
+              --skip-email \
+              --allow-root
+          fi
+
+      - name: nginx 설정 생성
+        run: |
+          mkdir -p deploy/nginx
+          cat > deploy/nginx/wpspot.conf << 'EOF'
+          server {
+            listen 80 default_server;
+            server_name _;
+            root /var/www/wordpress;
+            index index.php index.html;
+
+            gzip on;
+            gzip_types text/css application/javascript application/json text/plain;
+
+            location / {
+              try_files $uri $uri/ /index.php?$args;
+            }
+
+            location ~ \.php$ {
+              fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+              fastcgi_index index.php;
+              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              include fastcgi_params;
+            }
+
+            location ~* \.(css|js|jpg|jpeg|png|gif|svg|woff2?)$ {
+              expires 30d;
+              access_log off;
+            }
+          }
+          EOF
+
+      - name: PHP-FPM OPcache 설정
+        run: |
+          mkdir -p deploy/php
+          cat > deploy/php/opcache.ini << 'EOF'
+          opcache.enable=1
+          opcache.memory_consumption=128
+          opcache.max_accelerated_files=10000
+          opcache.validate_timestamps=0
+          EOF
+
+      - name: 정적 산출물 패키징 (Cloudflare Pages용)
+        run: |
+          set -e
+          mkdir -p dist
+          cp -r wordpress/* dist/
+          # Cloudflare Pages는 PHP를 직접 실행하지 않으므로
+          # wp-transform 워커(서비스 바인딩)가 dist/ 정적 자산을 서빙하고
+          # PHP 요청은 php-runner 워커로 위임한다. 정적 자산만 우선 배포.
+          echo "wpspot static bundle for ${{ inputs.site_name }}" > dist/_wpspot.txt
+
+      - name: Cloudflare Pages 배포
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          projectName: wpspot-${{ inputs.site_name }}
+          directory: dist
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: 변경사항 커밋
+        run: |
+          git config user.name "wpspot-bot"
+          git config user.email "bot@wpspot.app"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: provision wordpress + nginx/php-fpm bundle"
+          git push
