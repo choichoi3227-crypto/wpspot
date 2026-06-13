@@ -1,0 +1,27 @@
+name = "wpspot"
+main = "src/worker.js"
+compatibility_date = "2024-09-23"
+
+# 정적 파일(public/) 서빙
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Cloudflare D1 (사용자, 사이트, 자격증명 메타데이터)
+[[d1_databases]]
+binding = "DB"
+database_name = "wpspot-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Cloudflare KV (세션/캐시/레이트리밋)
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# JWT 서명용 시크릿 (wrangler secret put JWT_SECRET)
+# 자격증명 암호화용 시크릿 (wrangler secret put CRED_ENC_KEY)
+# 둘 다 `wrangler secret put` 명령으로 별도 등록 (wrangler.toml에 평문 작성 금지)
+
+[vars]
+APP_NAME = "wpspot"
+APP_ENV = "production"
