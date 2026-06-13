@@ -11,12 +11,12 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "wpspot-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "0ca2a71d-d98c-4f82-aaea-2d70fd294750"
 
 # Cloudflare KV (세션/캐시/레이트리밋)
 [[kv_namespaces]]
 binding = "KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "13f767b4020e438db9a7ee5ea320801c"
 
 # JWT 서명용 시크릿 (wrangler secret put JWT_SECRET)
 # 자격증명 암호화용 시크릿 (wrangler secret put CRED_ENC_KEY)
