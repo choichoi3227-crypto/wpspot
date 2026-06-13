@@ -1,0 +1,42 @@
+name: wpspot Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      blogger_blog_id:
+        description: "연동할 Blogspot Blog ID"
+        required: false
+  schedule:
+    # keep-alive: 5분마다 실행하여 서버리스 워드프레스 인스턴스를 warm 상태로 유지
+    - cron: "*/5 * * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 블로그스팟 템플릿 동기화
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.blogger_blog_id != '' }}
+        env:
+          GCP_BLOGGER_TOKEN: ${{ secrets.GCP_BLOGGER_TOKEN }}
+          BLOG_ID: ${{ inputs.blogger_blog_id }}
+          WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+        run: node scripts/blogger-sync.js
+
+      - name: Keep-alive ping
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+        run: |
+          if [ -n "$CF_WORKER_URL" ]; then
+            curl -sS -o /dev/null -w "%{http_code}\n" "$CF_WORKER_URL" || true
+          else
+            echo "CF_WORKER_URL secret이 설정되지 않아 keep-alive를 건너뜁니다."
+          fi
