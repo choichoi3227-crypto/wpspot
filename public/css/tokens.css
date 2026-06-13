@@ -1,0 +1,106 @@
+/* public/css/tokens.css
+   wpspot 디자인 토큰. design.md(Toss) 참고하여 색상 체계/spacing/radius/motion 정의.
+   product 도메인은 wpspot(워드프레스형 블로그스팟 호스팅) 고유. */
+
+:root {
+  /* ===== Brand ===== */
+  --color-blue-500: oklch(0.624 0.176 254);
+  --color-blue-600: oklch(0.522 0.176 257);
+  --color-blue-700: oklch(0.476 0.174 259);
+  --color-blue-50:  oklch(0.965 0.020 250);
+
+  /* ===== Greyscale ===== */
+  --color-grey-900: oklch(0.234 0.030 254);
+  --color-grey-800: oklch(0.342 0.030 253);
+  --color-grey-700: oklch(0.452 0.028 253);
+  --color-grey-600: oklch(0.555 0.022 253);
+  --color-grey-500: oklch(0.652 0.020 252);
+  --color-grey-400: oklch(0.752 0.016 251);
+  --color-grey-300: oklch(0.840 0.012 248);
+  --color-grey-200: oklch(0.913 0.008 247);
+  --color-grey-100: oklch(0.957 0.005 247);
+  --color-grey-50:  oklch(0.978 0.003 247);
+  --color-white:    oklch(1.000 0.000 0);
+
+  /* ===== Semantic ===== */
+  --color-red-500:   oklch(0.628 0.218 22);
+  --color-green-500: oklch(0.493 0.143 154);
+  --color-orange-500: oklch(0.748 0.183 56);
+  --color-navy-900:  oklch(0.155 0.060 261);
+
+  /* ===== Alpha ===== */
+  --fg-tertiary:   oklch(0.155 0.060 261 / 0.58);
+  --fg-quaternary: oklch(0.155 0.060 261 / 0.28);
+  --line-subtle:   oklch(0.000 0.000 0 / 0.08);
+  --bg-overlay:    oklch(0.000 0.000 0 / 0.56);
+  --press-overlay: oklch(0.000 0.000 0 / 0.26);
+  --disabled-opacity: 0.30;
+
+  /* ===== Semantic alias ===== */
+  --fill-brand: var(--color-blue-500);
+  --fill-primary: var(--color-grey-900);
+  --fill-secondary: var(--color-grey-100);
+  --fill-weak: var(--color-grey-50);
+  --fill-danger: var(--color-red-500);
+  --fill-success: var(--color-green-500);
+  --fill-warning: var(--color-orange-500);
+
+  --text-primary: var(--color-grey-900);
+  --text-secondary: var(--color-grey-700);
+  --text-tertiary: var(--fg-tertiary);
+  --text-placeholder: var(--fg-quaternary);
+  --text-alt: var(--color-white);
+  --text-brand: var(--color-blue-500);
+  --text-danger: var(--color-red-500);
+
+  --border-primary: var(--color-blue-500);
+  --border-secondary: var(--color-grey-200);
+  --border-strong: var(--color-grey-400);
+  --border-subtle: var(--line-subtle);
+
+  /* ===== Typography ===== */
+  --font-family-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+    "SF Pro Text", "SF Pro", "Apple SD Gothic Neo", "Noto Sans KR", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --fs-display-1: 56px; --lh-display-1: 1.30; --ls-display-1: -0.005em;
+  --fs-display-2: 40px; --lh-display-2: 1.20; --ls-display-2: -0.020em;
+  --fs-h1: 28px; --lh-h1: 1.30; --ls-h1: -0.020em;
+  --fs-h2: 24px; --lh-h2: 1.30; --ls-h2: -0.020em;
+  --fs-h3: 22px; --lh-h3: 1.30; --ls-h3: -0.015em;
+  --fs-h4: 20px; --lh-h4: 1.35; --ls-h4: -0.015em;
+  --fs-title-1: 18px; --lh-title-1: 1.45; --ls-title-1: -0.010em;
+  --fs-title-2: 17px; --lh-title-2: 1.45; --ls-title-2: -0.010em;
+  --fs-body-1: 17px; --lh-body-1: 1.50; --ls-body-1: -0.005em;
+  --fs-body-2: 15px; --lh-body-2: 1.50; --ls-body-2: -0.005em;
+  --fs-body-3: 13px; --lh-body-3: 1.50; --ls-body-3: 0;
+  --fs-label-l: 17px; --lh-label-l: 1.25; --ls-label-l: -0.005em;
+  --fs-label-m: 15px; --lh-label-m: 1.25; --ls-label-m: -0.005em;
+  --fs-label-s: 13px; --lh-label-s: 1.25; --ls-label-s: 0;
+  --fs-caption: 12px; --lh-caption: 1.40;
+
+  --font-feature-numeric-tabular: "tnum";
+  --font-feature-numeric-proportional: "pnum";
+
+  /* ===== Spacing (4px base) ===== */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-7: 28px; --space-8: 32px;
+  --space-10: 40px; --space-12: 48px; --space-16: 64px; --space-20: 80px;
+
+  /* ===== Radius ===== */
+  --radius-xs: 4px; --radius-s: 8px; --radius-m: 12px; --radius-l: 14px;
+  --radius-xl: 16px; --radius-2xl: 20px; --radius-3xl: 24px; --radius-4xl: 32px;
+  --radius-full: 999px;
+
+  /* ===== Elevation ===== */
+  --shadow-1: 0 1px 2px oklch(0.155 0.060 261 / 0.04), 0 1px 1px oklch(0.155 0.060 261 / 0.04);
+  --shadow-2: 0 4px 12px oklch(0.155 0.060 261 / 0.06), 0 1px 2px oklch(0.155 0.060 261 / 0.04);
+  --shadow-3: 0 12px 32px oklch(0.155 0.060 261 / 0.10), 0 2px 6px oklch(0.155 0.060 261 / 0.06);
+  --shadow-toast: 0 8px 24px oklch(0.155 0.060 261 / 0.16);
+
+  /* ===== Motion ===== */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+}
