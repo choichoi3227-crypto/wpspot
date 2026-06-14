@@ -6,28 +6,49 @@
   <title>내 계정 — wpspot</title>
   <link rel="stylesheet" href="/css/style.css" />
   <style>
-    .cred-row {
-      display: flex;
-      align-items: center;
-      gap: var(--space-2);
-    }
+    .cred-row { display: flex; align-items: center; gap: var(--space-2); }
     .cred-masked {
-      flex: 1;
-      font-family: monospace;
-      letter-spacing: 2px;
+      flex: 1; font-family: monospace; letter-spacing: 2px;
       color: var(--color-text-secondary);
       padding: var(--space-2) var(--space-3);
       background: var(--color-surface-2);
       border-radius: var(--radius-m);
       border: 1px solid var(--color-border);
-      min-height: 40px;
-      display: flex;
-      align-items: center;
+      min-height: 40px; display: flex; align-items: center;
     }
     .cred-edit-wrap { display: none; flex: 1; }
     .cred-edit-wrap.active { display: flex; flex-direction: column; gap: var(--space-1); flex: 1; }
-    .badge--registered { background: var(--color-success-light, #d1fae5); color: var(--color-success, #059669); }
-    .badge--missing { background: var(--color-warning-light, #fef3c7); color: var(--color-warning, #d97706); }
+    .badge--registered { background: #d1fae5; color: #059669; }
+    .badge--missing    { background: #fef3c7; color: #d97706; }
+    .badge--expired    { background: #fee2e2; color: #dc2626; }
+    .oauth-box {
+      background: var(--color-surface-2);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-m);
+      padding: var(--space-4);
+      margin-top: var(--space-3);
+    }
+    .oauth-box__title { font-weight: 600; margin-bottom: var(--space-2); }
+    .oauth-box__desc  { font-size: .85rem; color: var(--color-text-secondary); margin-bottom: var(--space-3); line-height: 1.5; }
+    .btn--google {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: #fff; color: #333;
+      border: 1px solid #dadce0; border-radius: 4px;
+      padding: 0 16px; height: 40px; font-size: .9rem; font-weight: 500;
+      cursor: pointer; width: 100%; justify-content: center;
+      box-shadow: 0 1px 2px rgba(0,0,0,.1);
+    }
+    .btn--google:hover { background: #f8f8f8; }
+    .btn--google svg  { flex-shrink: 0; }
+    .divider { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-3) 0; color: var(--color-text-secondary); font-size:.8rem; }
+    .divider::before,.divider::after { content:''; flex:1; height:1px; background:var(--color-border); }
+    .status-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: .8rem; padding: 2px 10px; border-radius: 99px;
+      font-weight: 500;
+    }
+    .status-chip--ok  { background:#d1fae5; color:#059669; }
+    .status-chip--err { background:#fee2e2; color:#dc2626; }
   </style>
 </head>
 <body>
@@ -39,10 +60,7 @@
 
     <div class="screen">
       <h1 class="h1 mt-2">연동 정보 관리</h1>
-      <p class="body-2">
-        아래 3가지 정보가 있어야 사이트를 만들 수 있어요. 한 번만 등록하면 모든 사이트에
-        공통으로 사용돼요. 모든 정보는 AES-256-GCM으로 암호화해 저장돼요.
-      </p>
+      <p class="body-2">모든 정보는 AES-256-GCM으로 암호화해 저장돼요.</p>
 
       <!-- GitHub Token -->
       <div class="section mt-6">
@@ -60,20 +78,48 @@
               </div>
               <button class="btn btn--secondary btn--s" id="ghEditBtn" onclick="toggleEdit('gh')">수정하기</button>
             </div>
-            <div class="field__help">repo, workflow 권한이 포함된 Fine-grained 또는 Classic PAT를 입력해주세요.</div>
+            <div class="field__help">repo, workflow 권한이 포함된 Fine-grained 또는 Classic PAT.</div>
           </div>
         </div>
       </div>
 
-      <!-- GCP Blogger Token -->
+      <!-- GCP Blogger — OAuth 자동 갱신 -->
       <div class="section">
         <div class="section__header">
-          <span class="title-1" style="margin:0;">GCP (Blogger API) Token</span>
+          <span class="title-1" style="margin:0;">Google (Blogger API)</span>
           <span id="gcpBadge" class="badge">확인 중</span>
         </div>
         <div class="card">
+
+          <!-- OAuth 자동 갱신 섹션 -->
+          <div class="oauth-box">
+            <div class="oauth-box__title">🔑 Google 계정 자동 연동 (권장)</div>
+            <div class="oauth-box__desc">
+              GCP 콘솔에서 OAuth 2.0 클라이언트 ID를 만든 후 아래에 입력하세요.<br>
+              승인된 리디렉션 URI: <code id="callbackUri" style="font-size:.8em;user-select:all;"></code>
+            </div>
+
+            <div id="oauthStatus" style="margin-bottom:var(--space-3); display:none;"></div>
+
+            <div class="field">
+              <label class="field__label">Client ID</label>
+              <input class="field__input" type="text" id="gcpClientId" placeholder="xxxxxxxxxx.apps.googleusercontent.com" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label class="field__label">Client Secret</label>
+              <input class="field__input" type="password" id="gcpClientSecret" placeholder="GOCSPX-xxxxxxxxxxxxxxxx" autocomplete="off" />
+            </div>
+            <button class="btn--google mt-2" id="googleAuthBtn" onclick="startGoogleOAuth()">
+              <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.2l6.8-6.8C35.7 2.4 30.2 0 24 0 14.6 0 6.7 5.6 2.9 13.7l7.9 6.1C12.5 13.5 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17z"/><path fill="#FBBC05" d="M10.8 28.2A14.6 14.6 0 0 1 9.5 24c0-1.5.3-2.9.7-4.2L2.9 13.7A24 24 0 0 0 0 24c0 3.8.9 7.4 2.9 10.5l7.9-6.3z"/><path fill="#34A853" d="M24 48c6.2 0 11.5-2 15.3-5.5l-7.5-5.8c-2 1.4-4.6 2.2-7.8 2.2-6.2 0-11.5-4-13.4-9.5l-7.9 6.3C6.7 42.4 14.6 48 24 48z"/></svg>
+              Google 계정으로 연동하기
+            </button>
+          </div>
+
+          <div class="divider">또는 직접 입력</div>
+
+          <!-- 수동 Access Token -->
           <div class="field">
-            <label class="field__label">OAuth Access / Refresh Token</label>
+            <label class="field__label">Access Token (수동 — 1시간 후 만료)</label>
             <div class="cred-row">
               <div class="cred-masked" id="gcpMasked">••••••••</div>
               <div class="cred-edit-wrap" id="gcpEditWrap">
@@ -81,7 +127,6 @@
               </div>
               <button class="btn btn--secondary btn--s" id="gcpEditBtn" onclick="toggleEdit('gcp')">수정하기</button>
             </div>
-            <div class="field__help">Blogger API 스코프가 포함된 토큰을 입력해주세요.</div>
           </div>
         </div>
       </div>
@@ -112,14 +157,14 @@
               </div>
               <button class="btn btn--secondary btn--s" id="cfEditBtn" onclick="toggleEdit('cf')">수정하기</button>
             </div>
-            <div class="field__help">Cloudflare 대시보드 &gt; 프로필 &gt; API 토큰에서 확인할 수 있어요.</div>
+            <div class="field__help">Cloudflare 대시보드 &gt; 프로필 &gt; API 토큰에서 확인.</div>
           </div>
           <div class="field">
             <label class="field__label">Account ID (선택)</label>
             <div class="cred-row">
               <div class="cred-masked" id="cfIdMasked">—</div>
               <div class="cred-edit-wrap" id="cfIdEditWrap">
-                <input class="field__input" type="text" id="cfAccountId" placeholder="비워두면 자동으로 조회해요" autocomplete="off" />
+                <input class="field__input" type="text" id="cfAccountId" placeholder="비워두면 자동 조회" autocomplete="off" />
               </div>
               <button class="btn btn--secondary btn--s" id="cfIdEditBtn" onclick="toggleEdit('cfId')">수정하기</button>
             </div>
@@ -137,58 +182,154 @@
 
   <script src="/js/app.js"></script>
   <script>
-    // 수정 모드 상태
     const editState = { gh: false, gcp: false, cf: false, cfEmail: false, cfId: false };
+
+    // 리디렉션 URI = 현재 페이지 URL (OAuth callback은 이 페이지에서 처리)
+    const REDIRECT_URI = window.location.origin + '/account.html';
+    document.getElementById('callbackUri').textContent = REDIRECT_URI;
 
     function toggleEdit(key) {
       editState[key] = !editState[key];
-      const wrap = document.getElementById(key === 'cfEmail' ? 'cfEmailEditWrap' : key === 'cfId' ? 'cfIdEditWrap' : `${key}EditWrap`);
-      const masked = document.getElementById(key === 'cfEmail' ? 'cfEmailMasked' : key === 'cfId' ? 'cfIdMasked' : `${key}Masked`);
-      const btn = document.getElementById(key === 'cfEmail' ? 'cfEmailEditBtn' : key === 'cfId' ? 'cfIdEditBtn' : `${key}EditBtn`);
+      const ids = {
+        gh: ['ghEditWrap','ghMasked','ghEditBtn','githubToken'],
+        gcp: ['gcpEditWrap','gcpMasked','gcpEditBtn','gcpBloggerToken'],
+        cf: ['cfEditWrap','cfMasked','cfEditBtn','cfGlobalApiKey'],
+        cfEmail: ['cfEmailEditWrap','cfEmailMasked','cfEmailEditBtn','cfAccountEmail'],
+        cfId: ['cfIdEditWrap','cfIdMasked','cfIdEditBtn','cfAccountId'],
+      }[key];
+      const [wrapId, maskedId, btnId, inputId] = ids;
+      const wrap = document.getElementById(wrapId);
+      const masked = document.getElementById(maskedId);
+      const btn = document.getElementById(btnId);
       if (editState[key]) {
         wrap.classList.add('active');
         masked.style.display = 'none';
         btn.textContent = '취소';
-        btn.classList.remove('btn--secondary');
-        btn.classList.add('btn--ghost');
+        btn.classList.replace('btn--secondary','btn--ghost');
       } else {
         wrap.classList.remove('active');
         masked.style.display = '';
         btn.textContent = '수정하기';
-        btn.classList.add('btn--secondary');
-        btn.classList.remove('btn--ghost');
-        // 입력 값 초기화
-        const inputs = { gh: 'githubToken', gcp: 'gcpBloggerToken', cf: 'cfGlobalApiKey', cfEmail: 'cfAccountEmail', cfId: 'cfAccountId' };
-        const el = document.getElementById(inputs[key]);
+        btn.classList.replace('btn--ghost','btn--secondary');
+        const el = document.getElementById(inputId);
         if (el) el.value = '';
       }
     }
 
-    function setBadge(id, registered) {
+    function setBadge(id, state) {
+      // state: 'ok' | 'missing' | 'expired'
       const el = document.getElementById(id);
-      el.textContent = registered ? '등록됨' : '미등록';
-      el.className = `badge ${registered ? 'badge--registered' : 'badge--missing'}`;
+      const map = {
+        ok:      ['badge--registered', '등록됨'],
+        missing: ['badge--missing',    '미등록'],
+        expired: ['badge--expired',    '만료됨'],
+      };
+      const [cls, label] = map[state] || map.missing;
+      el.textContent = label;
+      el.className = `badge ${cls}`;
     }
 
-    if (wpspot.requireAuth()) load();
+    if (wpspot.requireAuth()) {
+      load();
+      handleOAuthCallback(); // URL에 ?code= 있으면 자동 처리
+    }
 
     async function load() {
       try {
         const data = await wpspot.api('/api/account/credentials');
-        setBadge('ghBadge', data.hasGithubToken);
-        setBadge('gcpBadge', data.hasGcpBloggerToken);
-        setBadge('cfBadge', data.hasCfGlobalApiKey);
 
-        // 이메일/ID는 평문이므로 표시
+        setBadge('ghBadge', data.hasGithubToken ? 'ok' : 'missing');
+        setBadge('cfBadge', data.hasCfGlobalApiKey ? 'ok' : 'missing');
+
+        // GCP 상태 판단
+        if (!data.hasGcpBloggerToken && !data.hasGcpRefreshToken) {
+          setBadge('gcpBadge', 'missing');
+        } else if (data.hasGcpRefreshToken) {
+          setBadge('gcpBadge', 'ok');
+        } else if (data.gcpTokenExpired) {
+          setBadge('gcpBadge', 'expired');
+        } else {
+          setBadge('gcpBadge', 'ok');
+        }
+
         document.getElementById('cfEmailMasked').textContent = data.cfAccountEmail || '—';
-        document.getElementById('cfIdMasked').textContent = data.cfAccountId || '—';
+        document.getElementById('cfIdMasked').textContent   = data.cfAccountId    || '—';
+        document.getElementById('ghMasked').textContent     = data.hasGithubToken   ? '••••••••' : '(미등록)';
+        document.getElementById('gcpMasked').textContent    = data.hasGcpBloggerToken ? '••••••••' : '(미등록)';
+        document.getElementById('cfMasked').textContent     = data.hasCfGlobalApiKey ? '••••••••' : '(미등록)';
 
-        // 암호화된 값은 마스킹 표시
-        document.getElementById('ghMasked').textContent = data.hasGithubToken ? '••••••••' : '(미등록)';
-        document.getElementById('gcpMasked').textContent = data.hasGcpBloggerToken ? '••••••••' : '(미등록)';
-        document.getElementById('cfMasked').textContent = data.hasCfGlobalApiKey ? '••••••••' : '(미등록)';
+        // 저장된 Client ID 복원
+        if (data.gcpClientId) document.getElementById('gcpClientId').value = data.gcpClientId;
+
+        // OAuth 상태 표시
+        const statusEl = document.getElementById('oauthStatus');
+        if (data.hasGcpRefreshToken) {
+          statusEl.style.display = '';
+          statusEl.innerHTML = '<span class="status-chip status-chip--ok">✓ Refresh Token 연동됨 — 자동 갱신 활성화</span>';
+        } else if (data.hasGcpBloggerToken && data.gcpTokenExpired) {
+          statusEl.style.display = '';
+          statusEl.innerHTML = '<span class="status-chip status-chip--err">⚠ Access Token이 만료됐어요. 아래 버튼으로 재연동하세요.</span>';
+        } else {
+          statusEl.style.display = 'none';
+        }
       } catch (e) {
         wpspot.toast(e.message);
+      }
+    }
+
+    // Google OAuth 시작
+    async function startGoogleOAuth() {
+      const clientId = document.getElementById('gcpClientId').value.trim();
+      const clientSecret = document.getElementById('gcpClientSecret').value.trim();
+      if (!clientId) { wpspot.toast('Client ID를 입력해주세요.'); return; }
+      if (!clientSecret) { wpspot.toast('Client Secret을 입력해주세요.'); return; }
+
+      // Client Secret을 임시 저장 (콜백에서 사용)
+      sessionStorage.setItem('gcpClientId', clientId);
+      sessionStorage.setItem('gcpClientSecret', clientSecret);
+
+      try {
+        const { url } = await wpspot.api('/api/auth/google/url', {
+          method: 'POST',
+          body: JSON.stringify({ clientId, redirectUri: REDIRECT_URI }),
+        });
+        window.location.href = url;
+      } catch (e) {
+        wpspot.toast(e.message);
+      }
+    }
+
+    // OAuth 콜백: URL에 ?code= 있으면 토큰 교환
+    async function handleOAuthCallback() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      if (!code) return;
+
+      // URL 클린업
+      window.history.replaceState({}, '', window.location.pathname);
+
+      const clientId     = sessionStorage.getItem('gcpClientId');
+      const clientSecret = sessionStorage.getItem('gcpClientSecret');
+      sessionStorage.removeItem('gcpClientId');
+      sessionStorage.removeItem('gcpClientSecret');
+
+      if (!clientId || !clientSecret) {
+        wpspot.toast('Client ID / Secret 정보가 없어요. 다시 시도해주세요.');
+        return;
+      }
+
+      wpspot.toast('Google 계정 연동 중...');
+      try {
+        const res = await wpspot.api('/api/auth/google/callback', {
+          method: 'POST',
+          body: JSON.stringify({ code, redirectUri: REDIRECT_URI, clientId, clientSecret }),
+        });
+        wpspot.toast(res.hasRefreshToken
+          ? '✓ Google 계정이 연동됐어요. 자동 갱신이 활성화됐어요!'
+          : '✓ Access Token이 저장됐어요. (Refresh Token 없음 — 1시간 후 재연동 필요)');
+        load();
+      } catch (e) {
+        wpspot.toast('연동 실패: ' + e.message);
       }
     }
 
@@ -196,12 +337,9 @@
       const errorMsg = document.getElementById('errorMsg');
       errorMsg.classList.add('hidden');
       const btn = document.getElementById('submitBtn');
-      btn.disabled = true;
-      btn.textContent = '저장 중...';
+      btn.disabled = true; btn.textContent = '저장 중...';
 
       const body = {};
-
-      // 수정 모드이고 값이 있는 것만 포함
       if (editState.gh) {
         const v = document.getElementById('githubToken').value.trim();
         if (v) body.githubToken = v;
@@ -219,31 +357,28 @@
         if (v !== '') body.cfAccountEmail = v;
       }
       if (editState.cfId) {
-        const v = document.getElementById('cfAccountId').value.trim();
-        body.cfAccountId = v;
+        body.cfAccountId = document.getElementById('cfAccountId').value.trim();
       }
 
       if (Object.keys(body).length === 0) {
-        wpspot.toast('수정할 항목의 "수정하기" 버튼을 먼저 클릭하고 값을 입력해주세요.');
-        btn.disabled = false;
-        btn.textContent = '저장하기';
+        wpspot.toast('수정할 항목의 "수정하기"를 누르고 값을 입력해주세요.');
+        btn.disabled = false; btn.textContent = '저장하기';
         return;
       }
 
       try {
         await wpspot.api('/api/account/credentials', { method: 'PUT', body: JSON.stringify(body) });
         wpspot.toast('저장됐어요');
-        // 수정 모드 닫기
         Object.keys(editState).forEach(k => { if (editState[k]) toggleEdit(k); });
         load();
       } catch (e) {
         errorMsg.textContent = e.message;
         errorMsg.classList.remove('hidden');
       } finally {
-        btn.disabled = false;
-        btn.textContent = '저장하기';
+        btn.disabled = false; btn.textContent = '저장하기';
       }
     }
   </script>
 </body>
 </html>
+
