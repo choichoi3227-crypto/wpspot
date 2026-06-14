@@ -121,16 +121,59 @@ export async function createDnsRecord(email, globalApiKey, zoneId, record) {
   return data.result;
 }
 
-// DNS 레코드 수정
+// DNS 레코드 수정 — PATCH가 read-only 오류(1043)를 낼 수 있으므로
+// PUT 시도 → 실패 시 삭제 후 재생성(delete + create) 패턴으로 폴백
 export async function updateDnsRecord(email, globalApiKey, zoneId, recordId, record) {
-  const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records/${recordId}`, {
-    method: "PATCH",
-    headers: authHeaders(email, globalApiKey),
-    body: JSON.stringify(record),
+  const headers = authHeaders(email, globalApiKey);
+  const url = `${CF_API}/zones/${zoneId}/dns_records/${recordId}`;
+
+  // 1) 기존 레코드 조회 (재생성 시 필드 보존용)
+  const getRes = await fetch(url, { headers });
+  const getData = await getRes.json();
+  const existing = getData.result || {};
+
+  // 2) PUT 시도 (PATCH보다 더 넓은 권한으로 허용되는 경우 있음)
+  const putBody = { ...existing, ...record };
+  // PUT에 불필요한 read-only 서버 필드 제거
+  for (const k of ["id", "zone_id", "zone_name", "created_on", "modified_on", "meta", "locked"]) {
+    delete putBody[k];
+  }
+  const putRes = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(putBody),
   });
-  const data = await res.json();
-  if (!res.ok || !data.success) throw new Error(`DNS 레코드 수정 실패: ${JSON.stringify(data.errors)}`);
-  return data.result;
+  const putData = await putRes.json();
+  if (putRes.ok && putData.success) return putData.result;
+
+  // 3) PUT도 1043(read-only) 또는 기타 실패 → 삭제 후 재생성
+  const isReadOnly = (putData.errors || []).some(e => e.code === 1043);
+  const isNotAllowed = !putRes.ok;
+  if (isReadOnly || isNotAllowed) {
+    // 삭제
+    const delRes = await fetch(url, { method: "DELETE", headers });
+    const delData = await delRes.json();
+    if (!delRes.ok || !delData.success) {
+      throw new Error(`DNS 레코드 삭제 실패(재생성 준비 중): ${JSON.stringify(delData.errors)}`);
+    }
+    // 재생성
+    const createBody = { ...existing, ...record };
+    for (const k of ["id", "zone_id", "zone_name", "created_on", "modified_on", "meta", "locked"]) {
+      delete createBody[k];
+    }
+    const createRes = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(createBody),
+    });
+    const createData = await createRes.json();
+    if (!createRes.ok || !createData.success) {
+      throw new Error(`DNS 레코드 재생성 실패: ${JSON.stringify(createData.errors)}`);
+    }
+    return createData.result;
+  }
+
+  throw new Error(`DNS 레코드 수정 실패: ${JSON.stringify(putData.errors)}`);
 }
 
 // DNS 레코드 삭제
