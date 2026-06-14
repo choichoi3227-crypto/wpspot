@@ -98,6 +98,36 @@ async function handleApi(request, env, url) {
     return json({ token, user: { id: user.id, email: user.email, displayName: user.display_name } });
   }
 
+  // ---------- phpMyAdmin 토큰 검증 (phpmyadmin 접속용 — 로그인 불필요 공개 엔드포인트) ----------
+  const pmaAuthMatch = pathname.match(/^\/api\/pma\/([^/]+)\/auth$/);
+  if (pmaAuthMatch && method === "POST") {
+    const token = pmaAuthMatch[1];
+    const body = await request.json().catch(() => ({}));
+    const { username, password } = body;
+
+    const now = Math.floor(Date.now() / 1000);
+    const tokenRow = await env.DB.prepare(
+      "SELECT * FROM phpmyadmin_tokens WHERE token = ? AND expires_at > ?"
+    ).bind(token, now).first();
+    if (!tokenRow) return err("접속 링크가 만료되었거나 유효하지 않아요. 새 링크를 발급해주세요.", 401);
+
+    const siteCred = await env.DB.prepare(
+      "SELECT * FROM site_credentials WHERE site_id = ?"
+    ).bind(tokenRow.site_id).first();
+    if (!siteCred) return err("사이트 자격증명을 찾을 수 없어요.", 404);
+
+    if (siteCred.phpmyadmin_username !== username) return err("아이디 또는 비밀번호가 올바르지 않아요.", 401);
+    const valid = await verifyPassword(password, siteCred.phpmyadmin_password_hash);
+    if (!valid) return err("아이디 또는 비밀번호가 올바르지 않아요.", 401);
+
+    const pmaSessionToken = await signJWT(
+      { sub: tokenRow.site_id, pma: true },
+      env.JWT_SECRET,
+      3600
+    );
+    return json({ ok: true, sessionToken: pmaSessionToken, siteId: tokenRow.site_id });
+  }
+
   // ---------- 이하 모든 API는 로그인 필요 ----------
   const authUser = await getUserFromRequest(request, env);
   if (!authUser) return err("로그인이 필요합니다.", 401);
@@ -399,6 +429,7 @@ async function handleApi(request, env, url) {
         secret_cf_api_token: cfApiTokenPlain,
         secret_gcp_blogger_token: bloggerToken,
         secret_blog_id: site.blogger_blog_id || "",
+        secret_github_token: githubToken,  // PAT — secrets 등록에 필요
       });
 
       // 6) 호스팅 접속 정보 생성
@@ -520,36 +551,6 @@ async function handleApi(request, env, url) {
     });
   }
 
-  // ---------- phpMyAdmin 토큰 검증 (phpmyadmin 접속용) ----------
-  const pmaAuthMatch = pathname.match(/^\/api\/pma\/([^/]+)\/auth$/);
-  if (pmaAuthMatch && method === "POST") {
-    const token = pmaAuthMatch[1];
-    const body = await request.json().catch(() => ({}));
-    const { username, password } = body;
-
-    const now = Math.floor(Date.now() / 1000);
-    const tokenRow = await env.DB.prepare(
-      "SELECT * FROM phpmyadmin_tokens WHERE token = ? AND expires_at > ?"
-    ).bind(token, now).first();
-    if (!tokenRow) return err("접속 링크가 만료되었거나 유효하지 않아요. 새 링크를 발급해주세요.", 401);
-
-    const siteCred = await env.DB.prepare(
-      "SELECT * FROM site_credentials WHERE site_id = ?"
-    ).bind(tokenRow.site_id).first();
-    if (!siteCred) return err("사이트 자격증명을 찾을 수 없어요.", 404);
-
-    if (siteCred.phpmyadmin_username !== username) return err("아이디 또는 비밀번호가 올바르지 않아요.", 401);
-    const valid = await verifyPassword(password, siteCred.phpmyadmin_password_hash);
-    if (!valid) return err("아이디 또는 비밀번호가 올바르지 않아요.", 401);
-
-    // 임시 세션 토큰 발급
-    const pmaSessionToken = await signJWT(
-      { sub: tokenRow.site_id, pma: true },
-      env.JWT_SECRET,
-      3600 // 1시간
-    );
-    return json({ ok: true, sessionToken: pmaSessionToken, siteId: tokenRow.site_id });
-  }
 
   // ---------- phpMyAdmin: WP 스키마 조회 ----------
   const pmaTablesMatch = pathname.match(/^\/api\/pma\/tables$/);
