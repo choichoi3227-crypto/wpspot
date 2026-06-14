@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS sites (
   github_repo TEXT,                -- owner/repo
   cf_worker_name TEXT,
   cf_worker_url TEXT,              -- workers.dev URL
+  pma_worker_url TEXT,             -- PHPLiteAdmin Worker URL (wpspot-slug-pma.workers.dev)
   cf_zone_id TEXT,                 -- 연결된 Cloudflare Zone ID
   custom_domain TEXT,              -- 사용자 개인 도메인 (예: example.com)
   status TEXT NOT NULL DEFAULT 'pending',
