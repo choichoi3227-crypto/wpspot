@@ -196,3 +196,34 @@ export function getRequiredSecrets(cfWorkerUrl, cfAccountId, cfApiToken, blogger
     GCP_BLOGGER_TOKEN: bloggerToken,  // Blogger OAuth Access Token
   };
 }
+
+// GitHub Actions가 workflow_dispatch 트리거를 인식할 때까지 polling 대기
+// 워크플로우 파일을 푸시한 직후 바로 dispatch하면 422 에러 발생:
+// "Workflow does not have 'workflow_dispatch' trigger"
+// → GET /repos/{owner}/{repo}/actions/workflows/{file} 로 상태를 확인하며 대기
+export async function waitForWorkflowReady(token, owner, repo, workflowFile, maxWaitMs = 60000) {
+  const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
+  const interval = 3000; // 3초마다 폴링
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, interval));
+
+    try {
+      const res = await fetch(url, { headers: ghHeaders(token) });
+      if (res.ok) {
+        const data = await res.json();
+        // state가 "active"이면 dispatch 가능
+        if (data.state === "active") return true;
+      }
+    } catch (_) {
+      // 네트워크 오류는 무시하고 재시도
+    }
+  }
+
+  // 최대 대기 시간 초과 시에도 dispatch 시도 (GitHub가 인식 중일 수 있음)
+  throw new Error(
+    `워크플로우(${workflowFile})가 ${maxWaitMs / 1000}초 내에 활성화되지 않았습니다. ` +
+    "GitHub 레포 Actions 탭에서 직접 provision 워크플로우를 실행해주세요."
+  );
+}
