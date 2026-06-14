@@ -160,6 +160,17 @@
             <div class="field__help">Cloudflare 대시보드 &gt; 프로필 &gt; API 토큰에서 확인.</div>
           </div>
           <div class="field">
+            <label class="field__label">API Token <span style="font-size:.75rem;color:var(--color-text-secondary);">(Pages 배포 자동화용 — <strong>자동 Secret 등록에 필요</strong>)</span></label>
+            <div class="cred-row">
+              <div class="cred-masked" id="cfApiTokenMasked">••••••••</div>
+              <div class="cred-edit-wrap" id="cfApiTokenEditWrap">
+                <input class="field__input" type="password" id="cfApiToken" placeholder="Cloudflare API Token (Pages:Edit 권한)" autocomplete="off" />
+              </div>
+              <button class="btn btn--secondary btn--s" id="cfApiTokenEditBtn" onclick="toggleEdit('cfApiToken')">수정하기</button>
+            </div>
+            <div class="field__help">Cloudflare 대시보드 &gt; API 토큰 &gt; 토큰 만들기 &gt; Cloudflare Pages:Edit 권한 선택. 프로비저닝 시 GitHub Secrets에 자동 등록됩니다.</div>
+          </div>
+          <div class="field">
             <label class="field__label">Account ID (선택)</label>
             <div class="cred-row">
               <div class="cred-masked" id="cfIdMasked">—</div>
@@ -194,6 +205,7 @@
         gh: ['ghEditWrap','ghMasked','ghEditBtn','githubToken'],
         gcp: ['gcpEditWrap','gcpMasked','gcpEditBtn','gcpBloggerToken'],
         cf: ['cfEditWrap','cfMasked','cfEditBtn','cfGlobalApiKey'],
+        cfApiToken: ['cfApiTokenEditWrap','cfApiTokenMasked','cfApiTokenEditBtn','cfApiToken'],
         cfEmail: ['cfEmailEditWrap','cfEmailMasked','cfEmailEditBtn','cfAccountEmail'],
         cfId: ['cfIdEditWrap','cfIdMasked','cfIdEditBtn','cfAccountId'],
       }[key];
@@ -257,6 +269,7 @@
         document.getElementById('ghMasked').textContent     = data.hasGithubToken   ? '••••••••' : '(미등록)';
         document.getElementById('gcpMasked').textContent    = data.hasGcpBloggerToken ? '••••••••' : '(미등록)';
         document.getElementById('cfMasked').textContent     = data.hasCfGlobalApiKey ? '••••••••' : '(미등록)';
+        document.getElementById('cfApiTokenMasked').textContent = data.hasCfApiToken ? '••••••••' : '(미등록)';
 
         // 저장된 Client ID 복원
         if (data.gcpClientId) document.getElementById('gcpClientId').value = data.gcpClientId;
@@ -351,6 +364,8 @@
       if (editState.cf) {
         const v = document.getElementById('cfGlobalApiKey').value.trim();
         if (v) body.cfGlobalApiKey = v;
+        const vt = document.getElementById('cfApiToken').value.trim();
+        if (vt) body.cfApiToken = vt;
       }
       if (editState.cfEmail) {
         const v = document.getElementById('cfAccountEmail').value.trim();
