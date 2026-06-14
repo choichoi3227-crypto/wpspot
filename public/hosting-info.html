@@ -3,22 +3,151 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>호스팅 상세 — wpspot</title>
+  <title>호스팅 관리 — wpspot</title>
   <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    .info-card {
+      background: var(--color-white);
+      border: 1px solid var(--border-secondary);
+      border-radius: var(--radius-l);
+      padding: var(--space-5);
+      box-shadow: var(--shadow-1);
+      margin-bottom: var(--space-4);
+    }
+    .info-card__header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      margin-bottom: var(--space-4);
+      padding-bottom: var(--space-3);
+      border-bottom: 1px solid var(--border-secondary);
+    }
+    .info-card__icon {
+      font-size: 22px;
+      width: 40px; height: 40px;
+      border-radius: var(--radius-m);
+      display: flex; align-items: center; justify-content: center;
+      background: var(--fill-secondary);
+      flex-shrink: 0;
+    }
+    .info-card__title { font-size: var(--fs-title-1); font-weight: 700; letter-spacing: var(--ls-title-1); }
+    .info-card__subtitle { font-size: var(--fs-body-3); color: var(--text-secondary); margin-top: 2px; }
+
+    .field-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); }
+    .field-row:last-child { margin-bottom: 0; }
+    .field-label { font-size: var(--fs-body-3); color: var(--text-secondary); font-weight: 600; width: 110px; flex-shrink: 0; }
+    .field-value {
+      flex: 1; font-family: monospace; font-size: var(--fs-body-3);
+      background: var(--fill-weak); border: 1px solid var(--border-secondary);
+      border-radius: var(--radius-s); padding: 7px 10px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--text-primary);
+    }
+    .field-value.secret { letter-spacing: 3px; color: var(--text-secondary); }
+    .field-value a { color: var(--text-brand); text-decoration: none; }
+    .field-value a:hover { text-decoration: underline; }
+
+    .btn-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); }
+
+    .status-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: var(--fs-label-s); font-weight: 600; padding: 3px 10px;
+      border-radius: var(--radius-full);
+    }
+    .status-badge--active  { background: #d1fae5; color: #065f46; }
+    .status-badge--pending { background: #fef3c7; color: #92400e; }
+    .status-badge--error   { background: #fee2e2; color: #991b1b; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; }
+    .dot-green  { background: #10b981; }
+    .dot-orange { background: #f59e0b; }
+    .dot-red    { background: #ef4444; }
+
+    .domain-modal-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.5); z-index: 100;
+      align-items: center; justify-content: center;
+    }
+    .domain-modal-overlay.open { display: flex; }
+    .domain-modal {
+      background: var(--color-white); border-radius: var(--radius-2xl);
+      padding: var(--space-6); width: 100%; max-width: 480px;
+      box-shadow: var(--shadow-3); margin: var(--space-4);
+      max-height: 85vh; overflow-y: auto;
+    }
+    .domain-modal h3 { font-size: var(--fs-h3); font-weight: 700; margin: 0 0 var(--space-4); }
+    .domain-modal label { display: block; font-size: var(--fs-body-3); font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; margin-top: var(--space-3); }
+
+    .action-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 16px; border-radius: var(--radius-m);
+      border: none; cursor: pointer; font-size: var(--fs-label-m); font-weight: 600;
+      transition: background var(--dur-fast) var(--ease);
+    }
+    .action-btn--primary { background: var(--fill-brand); color: #fff; }
+    .action-btn--primary:hover { background: var(--color-blue-600); }
+    .action-btn--secondary { background: var(--fill-secondary); color: var(--text-primary); border: 1px solid var(--border-secondary); }
+    .action-btn--secondary:hover { background: var(--color-grey-200); }
+    .action-btn--danger { background: #fee2e2; color: #dc2626; }
+    .action-btn--danger:hover { background: #fecaca; }
+    .action-btn--success { background: #d1fae5; color: #065f46; }
+    .action-btn--success:hover { background: #a7f3d0; }
+    .action-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    .notice-box {
+      background: var(--fill-weak); border: 1px solid var(--border-secondary);
+      border-radius: var(--radius-m); padding: var(--space-3) var(--space-4);
+      font-size: var(--fs-body-3); color: var(--text-secondary); line-height: 1.6;
+    }
+    .notice-box.info  { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
+    .notice-box.warn  { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+    .notice-box.success { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
+
+    .divider { border: none; border-top: 1px solid var(--border-secondary); margin: var(--space-4) 0; }
+    .empty-state { text-align: center; padding: var(--space-12) var(--space-4); color: var(--text-tertiary); font-size: var(--fs-body-2); }
+
+    .reveal-btn { background: none; border: none; cursor: pointer; color: var(--text-brand); font-size: var(--fs-body-3); padding: 0; }
+    .reveal-btn:hover { text-decoration: underline; }
+  </style>
 </head>
 <body>
   <div class="app-shell">
     <div class="top-bar">
-      <span class="top-bar__title">호스팅 상세</span>
+      <span class="top-bar__title">호스팅 관리</span>
       <a href="/dashboard.html" class="btn btn--ghost btn--s">대시보드</a>
     </div>
 
     <div class="screen">
-      <h1 class="h1 mt-2" id="siteTitle">호스팅 정보</h1>
-      <p class="caption" id="siteSub"></p>
+      <div style="display:flex;align-items:baseline;gap:var(--space-3);margin-bottom:var(--space-2);">
+        <h1 class="h1" id="siteTitle" style="margin:0;">호스팅 정보</h1>
+        <span id="statusBadge"></span>
+      </div>
+      <p class="caption" id="siteSub" style="margin-bottom:var(--space-6);"></p>
 
-      <div id="content" class="mt-6">
-        <div class="empty">불러오는 중...</div>
+      <div id="content">
+        <div class="empty-state">불러오는 중…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 도메인 연결 모달 -->
+  <div class="domain-modal-overlay" id="domainModal">
+    <div class="domain-modal">
+      <h3>🌐 개인 도메인 연결</h3>
+      <p class="body-2" style="margin-bottom:var(--space-4);">Cloudflare에 등록된 도메인을 이 호스팅에 연결해요. 연결하면 <code>pma.도메인</code>으로 PHPLiteAdmin에도 접속할 수 있어요.</p>
+
+      <label>도메인 선택 <span style="font-weight:400;color:var(--text-secondary);">(Cloudflare에 등록된 도메인)</span></label>
+      <select id="zoneSelect" style="width:100%;padding:9px 12px;border:1.5px solid var(--border-secondary);border-radius:var(--radius-m);font-size:var(--fs-body-2);outline:none;background:var(--fill-weak);">
+        <option value="">— 도메인 선택 —</option>
+      </select>
+      <p style="font-size:var(--fs-body-3);color:var(--text-secondary);margin-top:6px;">
+        목록에 없으면 <a href="/domains.html" target="_blank" style="color:var(--text-brand);">도메인 관리</a>에서 먼저 추가해주세요.
+      </p>
+
+      <div id="domainModalError" style="color:var(--text-danger);font-size:var(--fs-body-3);margin-top:var(--space-2);display:none;"></div>
+
+      <div style="display:flex;gap:var(--space-2);margin-top:var(--space-5);">
+        <button class="action-btn action-btn--secondary" style="flex:1" onclick="closeModal()">취소</button>
+        <button class="action-btn action-btn--primary" style="flex:2" id="connectDomainBtn" onclick="connectDomain()">연결하기</button>
       </div>
     </div>
   </div>
@@ -26,146 +155,365 @@
   <script src="/js/app.js"></script>
   <script>
     const siteId = new URLSearchParams(location.search).get("site");
+    let siteData = null;
+    let credData = null;
+    let showPwd = false;
+
     if (wpspot.requireAuth()) load();
 
     async function load() {
       const content = document.getElementById("content");
-      if (!siteId) {
-        content.innerHTML = `<div class="empty">사이트 ID가 없어요.</div>`;
-        return;
-      }
+      if (!siteId) { content.innerHTML = `<div class="empty-state">사이트 ID가 없어요.</div>`; return; }
       try {
-        const sites = (await wpspot.api("/api/sites")).sites || [];
-        const site = sites.find((s) => s.id === siteId);
-        if (site) {
-          document.getElementById("siteTitle").textContent = site.site_name;
-          document.getElementById("siteSub").textContent = site.github_repo || "프로비저닝 전";
+        const [sites, cred] = await Promise.all([
+          wpspot.api("/api/sites"),
+          wpspot.api(`/api/sites/${siteId}/credentials`),
+        ]);
+        siteData = (sites.sites || []).find(s => s.id === siteId);
+        credData = cred;
+        if (siteData) {
+          document.getElementById("siteTitle").textContent = siteData.site_name;
+          document.getElementById("siteSub").textContent = siteData.github_repo || "프로비저닝 전";
+          document.getElementById("statusBadge").innerHTML = statusBadge(siteData.status);
         }
-
-        const data = await wpspot.api(`/api/sites/${siteId}/credentials`);
-        if (!data.provisioned) {
-          content.innerHTML = `<div class="empty">아직 프로비저닝되지 않았어요.<br/>대시보드에서 프로비저닝을 먼저 진행해주세요.</div>`;
+        if (!cred.provisioned) {
+          content.innerHTML = `<div class="empty-state">아직 프로비저닝되지 않았어요.<br/>대시보드에서 프로비저닝을 먼저 진행해주세요.</div>`;
           return;
         }
-        content.innerHTML = render(data);
-        bindCopyButtons();
+        content.innerHTML = render(cred, siteData);
+        bindEvents();
       } catch (e) {
-        content.innerHTML = `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
+        content.innerHTML = `<div class="empty-state">${wpspot.escapeHtml(e.message)}</div>`;
       }
     }
 
-    function maskedField(label, maskedValue, realValue, copyable) {
-      return `
-        <div class="field">
-          <div class="field__label">${label}</div>
-          <div class="row">
-            <input class="field__input tabular" type="text" value="${wpspot.escapeHtml(maskedValue ?? "")}" readonly id="field_${label.replace(/\s/g,'_')}" />
-            ${copyable ? `<button class="btn btn--secondary btn--s" data-copy="${wpspot.escapeHtml(realValue ?? "")}">복사</button>` : ""}
-          </div>
-        </div>
-      `;
+    function statusBadge(status) {
+      const map = {
+        active: ['active', '●', '활성'],
+        provisioning: ['pending', '◌', '프로비저닝 중'],
+        pending: ['pending', '○', '대기 중'],
+        error: ['error', '✕', '오류'],
+      };
+      const [cls, dot, label] = map[status] || ['pending', '○', status];
+      return `<span class="status-badge status-badge--${cls}">${dot} ${label}</span>`;
     }
 
-    function field(label, value, copy) {
-      return `
-        <div class="field">
-          <div class="field__label">${label}</div>
-          <div class="row">
-            <input class="field__input tabular" type="text" value="${wpspot.escapeHtml(value ?? "")}" readonly />
-            ${copy ? `<button class="btn btn--secondary btn--s" data-copy="${wpspot.escapeHtml(value ?? "")}">복사</button>` : ""}
-          </div>
-        </div>
-      `;
+    function fv(value, secret = false) {
+      return `<div class="field-value${secret ? ' secret' : ''}">${wpspot.escapeHtml(value ?? '—')}</div>`;
+    }
+    function fvLink(url, label) {
+      return `<div class="field-value"><a href="${wpspot.escapeHtml(url)}" target="_blank">${wpspot.escapeHtml(label || url)}</a></div>`;
     }
 
-    function render(data) {
-      const pma = data.phpmyadmin;
-      const pmaPass = pma.password || "";
-      const maskedPass = pmaPass ? "••••••••" : "(프로비저닝 후 표시)";
+    function render(cred, site) {
+      const pla = cred.pla || {};
+      const wp = cred.wordpress || {};
+      const domain = cred.domain || {};
+      const nginx = cred.nginx || {};
+      const customDomain = domain.customDomain || site?.custom_domain;
+      const pmaDomain = domain.pmaDomain || (customDomain ? `pma.${customDomain}` : null);
+      const plaUrl = pla.url || (pmaDomain ? `https://${pmaDomain}` : null);
+      const adminUrl = wp.adminUrl || (customDomain ? `https://${customDomain}/wp-admin` : (nginx.workerUrl ? `${nginx.workerUrl}/wp-admin` : null));
 
       return `
-        <section class="section">
-          <div class="section__header">
-            <span class="title-1" style="margin:0;">phpMyAdmin</span>
-            ${wpspot.statusBadge("active")}
-          </div>
-          <div class="card">
-            <div class="field">
-              <div class="field__label">접속 주소</div>
-              <div class="row">
-                <input class="field__input tabular" type="text" value="${wpspot.escapeHtml(pma.url)}" readonly />
-                <button class="btn btn--secondary btn--s" data-copy="${wpspot.escapeHtml(pma.url)}">복사</button>
-                <a class="btn btn--primary btn--s" href="${wpspot.escapeHtml(pma.url)}" target="_blank">열기</a>
-              </div>
-              <div class="field__help">${wpspot.escapeHtml(pma.note || "")}</div>
+        <!-- ── 도메인 / 접속 현황 ── -->
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">🌐</div>
+            <div>
+              <div class="info-card__title">도메인 및 접속</div>
+              <div class="info-card__subtitle">사이트 주소 및 관리자 접속 정보</div>
             </div>
-            ${maskedField("아이디", pma.username, pma.username, true)}
-            ${maskedField("비밀번호", maskedPass, pmaPass, !!pmaPass)}
-            ${field("DB 경로 (레포 내)", pma.dbPath)}
-            <p class="caption mt-2">
-              📋 접속 방법: 위 주소로 이동 → 아이디/비밀번호 입력 → 로그인<br/>
-              🔒 접속 링크는 매일 자정(KST) 자동으로 초기화돼요. 새 링크는 이 페이지를 새로고침하면 확인할 수 있어요.
-            </p>
+            ${customDomain
+              ? `<span class="status-badge status-badge--active" style="margin-left:auto;">● 도메인 연결됨</span>`
+              : `<button class="action-btn action-btn--primary" style="margin-left:auto;font-size:var(--fs-body-3);" onclick="openDomainModal()">+ 도메인 연결</button>`
+            }
           </div>
-        </section>
 
-        <section class="section">
-          <div class="section__header">
-            <span class="title-1" style="margin:0;">스토리지 구성</span>
-          </div>
-          <div class="card">
-            <table style="width:100%; border-collapse:collapse; font-size: 0.875rem;">
-              <thead>
-                <tr style="border-bottom: 1px solid var(--color-border);">
-                  <th style="text-align:left; padding: 8px 4px; font-weight:600;">데이터 종류</th>
-                  <th style="text-align:left; padding: 8px 4px; font-weight:600;">저장 위치</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td style="padding:8px 4px;">글 / 페이지 (콘텐츠)</td><td style="padding:8px 4px;">Blogspot + GitHub 레포</td></tr>
-                <tr><td style="padding:8px 4px;">WP 설정 / 사용자 / 카테고리</td><td style="padding:8px 4px;">자체 phpMyAdmin (D1 DB)</td></tr>
-                <tr><td style="padding:8px 4px;">미디어 / 파일</td><td style="padding:8px 4px;">사용자 GitHub 레포</td></tr>
-                <tr><td style="padding:8px 4px;">테마 / 플러그인</td><td style="padding:8px 4px;">사용자 GitHub 레포</td></tr>
-                <tr><td style="padding:8px 4px;">사이트 기본 정보</td><td style="padding:8px 4px;">자체 phpMyAdmin (D1 DB)</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+          ${customDomain ? `
+            <div class="field-row">
+              <span class="field-label">메인 도메인</span>
+              ${fvLink(`https://${customDomain}`, customDomain)}
+              <button class="btn btn--secondary btn--s" onclick="copyText('https://${wpspot.escapeHtml(customDomain)}')">복사</button>
+            </div>
+            <div class="field-row">
+              <span class="field-label">PHPLiteAdmin</span>
+              ${fvLink(`https://${wpspot.escapeHtml(pmaDomain || '')}`, pmaDomain || '—')}
+              <button class="btn btn--secondary btn--s" onclick="copyText('https://${wpspot.escapeHtml(pmaDomain || '')}')">복사</button>
+              ${plaUrl ? `<a class="action-btn action-btn--primary" href="${wpspot.escapeHtml(plaUrl)}" target="_blank" style="white-space:nowrap;">열기 ↗</a>` : ""}
+            </div>
+          ` : `
+            <div class="notice-box warn">
+              ⚠️ 개인 도메인이 연결되지 않았어요. 도메인을 연결해야 PHPLiteAdmin(<code>pma.도메인</code>)에 접속할 수 있어요.
+            </div>
+            ${nginx.workerUrl ? `
+              <div class="field-row mt-3">
+                <span class="field-label">임시 URL</span>
+                ${fvLink(nginx.workerUrl, nginx.workerUrl)}
+                <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(nginx.workerUrl)}')">복사</button>
+              </div>` : ""}
+          `}
 
-        <section class="section">
-          <div class="section__header"><span class="title-1" style="margin:0;">SFTP (GitHub API 대체)</span></div>
-          <div class="card">
-            ${field("연결 계정", data.sftp.username)}
-            ${field("루트 경로", data.sftp.root)}
-            ${field("레포지토리", data.sftp.repo)}
-            <p class="caption">${wpspot.escapeHtml(data.sftp.note)}</p>
-            <a class="btn btn--primary btn--l" href="${data.sftp.url}">파일 관리자 열기</a>
-          </div>
-        </section>
+          ${adminUrl ? `
+            <hr class="divider" />
+            <div class="field-row">
+              <span class="field-label">WP 관리자</span>
+              ${fvLink(adminUrl, adminUrl)}
+              <a class="action-btn action-btn--secondary" href="${wpspot.escapeHtml(adminUrl)}" target="_blank">열기 ↗</a>
+            </div>` : ""}
+        </div>
 
-        <section class="section">
-          <div class="section__header">
-            <span class="title-1" style="margin:0;">nginx + PHP (ephemeral 컨테이너)</span>
-            ${wpspot.statusBadge(data.nginx.status === "ready" ? "active" : "pending")}
+        <!-- ── WordPress 관리자 정보 ── -->
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">🔑</div>
+            <div>
+              <div class="info-card__title">WordPress 관리자</div>
+              <div class="info-card__subtitle">wp-admin 로그인 정보</div>
+            </div>
+            ${statusBadge(nginx.status || 'pending')}
           </div>
-          <div class="card">
-            <p class="body-2">${wpspot.escapeHtml(data.nginx.engine)}</p>
-            ${field("프록시 워커 URL", data.nginx.workerUrl || "-", true)}
+
+          <div class="field-row">
+            <span class="field-label">아이디</span>
+            ${fv(wp.username)}
+            <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(wp.username || '')}')">복사</button>
           </div>
-        </section>
+          <div class="field-row">
+            <span class="field-label">비밀번호</span>
+            <div class="field-value" id="wpPwField" style="letter-spacing:3px;color:var(--text-secondary);">••••••••</div>
+            <button class="reveal-btn" onclick="toggleWpPw(${JSON.stringify(wp.password || '')})">보기</button>
+            <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(wp.password || '')}')">복사</button>
+          </div>
+
+          <div class="notice-box info" style="margin-top:var(--space-3);">
+            💡 로그인 후 반드시 비밀번호를 변경하세요.
+          </div>
+        </div>
+
+        <!-- ── PHPLiteAdmin 접속 ── -->
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">🗄️</div>
+            <div>
+              <div class="info-card__title">PHPLiteAdmin (DB 관리)</div>
+              <div class="info-card__subtitle">WordPress SQLite DB를 직접 관리</div>
+            </div>
+          </div>
+
+          ${plaUrl ? `
+            <div class="field-row">
+              <span class="field-label">접속 주소</span>
+              <div class="field-value"><a href="${wpspot.escapeHtml(plaUrl)}" target="_blank">${wpspot.escapeHtml(plaUrl)}</a></div>
+              <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(plaUrl)}')">복사</button>
+              <a class="action-btn action-btn--primary" href="${wpspot.escapeHtml(plaUrl)}" target="_blank">열기 ↗</a>
+            </div>` : `
+            <div class="field-row">
+              <span class="field-label">임시 접속</span>
+              <div class="field-value"><a href="${wpspot.escapeHtml(pla.fallbackUrl || '#')}">/phpliteadmin-lite (토큰 기반)</a></div>
+              <a class="action-btn action-btn--secondary" href="${wpspot.escapeHtml(pla.fallbackUrl || '#')}">열기</a>
+            </div>
+            <div class="notice-box warn" style="margin-top:var(--space-3);">
+              ⚠️ 개인 도메인 연결 시 <code>pma.도메인</code>으로 정식 접속 가능해요.
+            </div>`
+          }
+
+          <div class="field-row" style="margin-top:var(--space-3);">
+            <span class="field-label">비밀번호</span>
+            <div class="field-value" id="plaPwField" style="letter-spacing:3px;color:var(--text-secondary);">••••••••</div>
+            <button class="reveal-btn" onclick="togglePlaPw(${JSON.stringify(pla.password || '')})">보기</button>
+            <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(pla.password || '')}')">복사</button>
+          </div>
+          <div class="field-row">
+            <span class="field-label">DB 경로</span>
+            ${fv(pla.dbPath || 'wp-content/database/wordpress.db')}
+          </div>
+
+          <div style="margin-top:var(--space-3);" class="notice-box">
+            🔒 PHPLiteAdmin 직접 URL 접속은 차단되어 있어요. 반드시 <code>pma.도메인</code>을 통해서만 접근 가능해요.<br/>
+            접속 링크는 매일 자정(KST) 초기화됩니다.
+          </div>
+        </div>
+
+        <!-- ── 인프라 구성 ── -->
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">⚙️</div>
+            <div>
+              <div class="info-card__title">인프라 구성</div>
+              <div class="info-card__subtitle">nginx + PHP-FPM + SQLite</div>
+            </div>
+          </div>
+
+          <div class="field-row">
+            <span class="field-label">GitHub 레포</span>
+            ${site?.github_repo
+              ? fvLink(`https://github.com/${site.github_repo}`, site.github_repo)
+              : fv('—')}
+          </div>
+          <div class="field-row">
+            <span class="field-label">CF Worker URL</span>
+            ${nginx.workerUrl ? fvLink(nginx.workerUrl, nginx.workerUrl) : fv('—')}
+            ${nginx.workerUrl ? `<button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(nginx.workerUrl)}')">복사</button>` : ''}
+          </div>
+          <div class="field-row">
+            <span class="field-label">실행 엔진</span>
+            ${fv('nginx + PHP-FPM 8.3 + SQLite (GitHub Actions)')}
+          </div>
+          <div class="field-row">
+            <span class="field-label">서버 상태</span>
+            <div class="field-value" style="display:flex;align-items:center;gap:8px;">
+              ${nginx.status === 'ready' || nginx.status === 'active'
+                ? '<span style="color:#10b981;">● 실행 중</span>'
+                : nginx.status === 'provisioning'
+                  ? '<span style="color:#f59e0b;">◌ 프로비저닝 중</span>'
+                  : '<span style="color:#94a3b8;">○ 준비 안됨</span>'}
+            </div>
+          </div>
+        </div>
+
+        <!-- ── 관리 도구 ── -->
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">🛠️</div>
+            <div>
+              <div class="info-card__title">관리 도구</div>
+              <div class="info-card__subtitle">캐시, 파일, 도메인 관리</div>
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <button class="action-btn action-btn--secondary" onclick="purgeCache()" id="purgeBtn">
+              🗑️ 캐시 초기화 (Cloudflare)
+            </button>
+            <a class="action-btn action-btn--secondary" href="/file-manager.html?site=${wpspot.escapeHtml(siteId)}">
+              📁 파일 관리자
+            </a>
+            <a class="action-btn action-btn--secondary" href="/domains.html">
+              🌐 도메인 관리
+            </a>
+            ${customDomain ? `
+              <a class="action-btn action-btn--secondary" href="/dns.html?zone=${wpspot.escapeHtml(site?.cf_zone_id || '')}&domain=${wpspot.escapeHtml(customDomain)}">
+                🔧 DNS 관리
+              </a>` : ''}
+          </div>
+
+          ${!site?.cf_zone_id
+            ? `<div class="notice-box warn" style="margin-top:var(--space-3);">캐시 초기화는 도메인 연결 후 사용할 수 있어요.</div>`
+            : `<div class="notice-box" style="margin-top:var(--space-3);">캐시 초기화는 해당 Zone의 모든 캐시를 제거해요. 변경사항이 즉시 반영됩니다.</div>`}
+        </div>
       `;
     }
 
-    function bindCopyButtons() {
-      document.querySelectorAll("[data-copy]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const val = btn.dataset.copy;
-          if (!val || val === "(프로비저닝 후 표시)") { wpspot.toast("복사할 값이 없어요"); return; }
-          navigator.clipboard?.writeText(val);
-          wpspot.toast("복사했어요");
-        });
-      });
+    function bindEvents() {}
+
+    function toggleWpPw(pw) {
+      const el = document.getElementById("wpPwField");
+      if (el.textContent === "••••••••") {
+        el.textContent = pw || "(없음)";
+        el.style.letterSpacing = "0";
+        el.style.color = "";
+      } else {
+        el.textContent = "••••••••";
+        el.style.letterSpacing = "3px";
+        el.style.color = "var(--text-secondary)";
+      }
     }
+
+    function togglePlaPw(pw) {
+      const el = document.getElementById("plaPwField");
+      if (el.textContent === "••••••••") {
+        el.textContent = pw || "(없음)";
+        el.style.letterSpacing = "0";
+        el.style.color = "";
+      } else {
+        el.textContent = "••••••••";
+        el.style.letterSpacing = "3px";
+        el.style.color = "var(--text-secondary)";
+      }
+    }
+
+    function copyText(val) {
+      if (!val || val === "—") { wpspot.toast("복사할 값이 없어요"); return; }
+      navigator.clipboard?.writeText(val).catch(() => {
+        const ta = document.createElement("textarea");
+        ta.value = val;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      });
+      wpspot.toast("복사했어요 ✓");
+    }
+
+    async function purgeCache() {
+      const btn = document.getElementById("purgeBtn");
+      if (!siteData?.cf_zone_id) { wpspot.toast("도메인을 먼저 연결해주세요."); return; }
+      btn.disabled = true;
+      btn.textContent = "초기화 중…";
+      try {
+        await wpspot.api(`/api/sites/${siteId}/purge-cache`, { method: "POST" });
+        wpspot.toast("Cloudflare 캐시가 초기화됐어요 ✓");
+      } catch (e) {
+        wpspot.toast(e.message, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "🗑️ 캐시 초기화 (Cloudflare)";
+      }
+    }
+
+    // ── 도메인 연결 모달 ────────────────────────────────────────────────────
+    async function openDomainModal() {
+      document.getElementById("domainModalError").style.display = "none";
+      const select = document.getElementById("zoneSelect");
+      select.innerHTML = '<option value="">불러오는 중…</option>';
+      document.getElementById("domainModal").classList.add("open");
+      try {
+        const data = await wpspot.api("/api/domains");
+        const zones = (data.zones || []).filter(z => z.status === "active");
+        if (!zones.length) {
+          select.innerHTML = '<option value="">— 활성 도메인 없음 (도메인 관리에서 추가) —</option>';
+        } else {
+          select.innerHTML = '<option value="">— 선택 —</option>' +
+            zones.map(z => `<option value="${wpspot.escapeHtml(z.id)}" data-name="${wpspot.escapeHtml(z.name)}">${wpspot.escapeHtml(z.name)}</option>`).join("");
+        }
+      } catch (e) {
+        select.innerHTML = `<option value="">${wpspot.escapeHtml(e.message)}</option>`;
+      }
+    }
+
+    async function connectDomain() {
+      const select = document.getElementById("zoneSelect");
+      const zoneId = select.value;
+      const zoneName = select.options[select.selectedIndex]?.dataset?.name || "";
+      const errEl = document.getElementById("domainModalError");
+      errEl.style.display = "none";
+      if (!zoneId) { errEl.textContent = "도메인을 선택해주세요."; errEl.style.display = ""; return; }
+
+      const btn = document.getElementById("connectDomainBtn");
+      btn.disabled = true; btn.textContent = "연결 중…";
+      try {
+        await wpspot.api(`/api/sites/${siteId}/connect-domain`, {
+          method: "POST",
+          body: JSON.stringify({ customDomain: zoneName, zoneId }),
+        });
+        closeModal();
+        wpspot.toast(`${zoneName} 도메인이 연결됐어요 ✓`);
+        load(); // 새로고침
+      } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = "";
+      } finally {
+        btn.disabled = false; btn.textContent = "연결하기";
+      }
+    }
+
+    function closeModal() {
+      document.getElementById("domainModal").classList.remove("open");
+    }
+    document.getElementById("domainModal").addEventListener("click", e => {
+      if (e.target === document.getElementById("domainModal")) closeModal();
+    });
   </script>
 </body>
 </html>
