@@ -107,7 +107,7 @@ async function handleApi(request, env, url) {
   if (pathname === "/api/account/credentials" && method === "GET") {
     const row = await env.DB.prepare(
       `SELECT cf_account_email, cf_account_id, github_token_enc,
-              gcp_blogger_token_enc, cf_global_api_key_enc,
+              gcp_blogger_token_enc, cf_global_api_key_enc, cf_api_token_enc,
               gcp_blogger_client_id, gcp_blogger_client_secret_enc,
               gcp_blogger_refresh_token_enc, gcp_blogger_token_expires_at
        FROM user_credentials WHERE user_id = ?`
@@ -124,6 +124,7 @@ async function handleApi(request, env, url) {
       hasGithubToken: !!row?.github_token_enc,
       hasGcpBloggerToken: !!row?.gcp_blogger_token_enc,
       hasCfGlobalApiKey: !!row?.cf_global_api_key_enc,
+      hasCfApiToken: !!row?.cf_api_token_enc,
       // OAuth 자동 갱신 관련
       gcpClientId: row?.gcp_blogger_client_id || "",
       hasGcpClientSecret: !!row?.gcp_blogger_client_secret_enc,
@@ -137,12 +138,14 @@ async function handleApi(request, env, url) {
     const body = await request.json().catch(() => ({}));
     const {
       githubToken, gcpBloggerToken, cfGlobalApiKey, cfAccountEmail, cfAccountId,
+      cfApiToken,
       gcpClientId, gcpClientSecret, gcpRefreshToken,
     } = body;
 
     const githubEnc = githubToken ? await encryptSecret(env, githubToken) : undefined;
     const gcpEnc = gcpBloggerToken ? await encryptSecret(env, gcpBloggerToken) : undefined;
     const cfKeyEnc = cfGlobalApiKey ? await encryptSecret(env, cfGlobalApiKey) : undefined;
+    const cfApiTokenEnc = cfApiToken ? await encryptSecret(env, cfApiToken) : undefined;
     const gcpSecretEnc = gcpClientSecret ? await encryptSecret(env, gcpClientSecret) : undefined;
     const gcpRefreshEnc = gcpRefreshToken ? await encryptSecret(env, gcpRefreshToken) : undefined;
 
@@ -151,29 +154,30 @@ async function handleApi(request, env, url) {
     if (existing) {
       const sets = [];
       const binds = [];
-      if (githubEnc !== undefined)     { sets.push("github_token_enc = ?");                   binds.push(githubEnc); }
-      if (gcpEnc !== undefined)        { sets.push("gcp_blogger_token_enc = ?");               binds.push(gcpEnc); }
-      if (cfKeyEnc !== undefined)      { sets.push("cf_global_api_key_enc = ?");               binds.push(cfKeyEnc); }
-      if (cfAccountEmail !== undefined){ sets.push("cf_account_email = ?");                    binds.push(cfAccountEmail); }
-      if (cfAccountId !== undefined)   { sets.push("cf_account_id = ?");                       binds.push(cfAccountId); }
-      if (gcpClientId !== undefined)   { sets.push("gcp_blogger_client_id = ?");               binds.push(gcpClientId); }
-      if (gcpSecretEnc !== undefined)  { sets.push("gcp_blogger_client_secret_enc = ?");       binds.push(gcpSecretEnc); }
-      if (gcpRefreshEnc !== undefined) { sets.push("gcp_blogger_refresh_token_enc = ?");       binds.push(gcpRefreshEnc);
-                                         sets.push("gcp_blogger_token_expires_at = 0"); } // 즉시 갱신 트리거
+      if (githubEnc !== undefined)      { sets.push("github_token_enc = ?");                   binds.push(githubEnc); }
+      if (gcpEnc !== undefined)         { sets.push("gcp_blogger_token_enc = ?");               binds.push(gcpEnc); }
+      if (cfKeyEnc !== undefined)       { sets.push("cf_global_api_key_enc = ?");               binds.push(cfKeyEnc); }
+      if (cfApiTokenEnc !== undefined)  { sets.push("cf_api_token_enc = ?");                    binds.push(cfApiTokenEnc); }
+      if (cfAccountEmail !== undefined) { sets.push("cf_account_email = ?");                    binds.push(cfAccountEmail); }
+      if (cfAccountId !== undefined)    { sets.push("cf_account_id = ?");                       binds.push(cfAccountId); }
+      if (gcpClientId !== undefined)    { sets.push("gcp_blogger_client_id = ?");               binds.push(gcpClientId); }
+      if (gcpSecretEnc !== undefined)   { sets.push("gcp_blogger_client_secret_enc = ?");       binds.push(gcpSecretEnc); }
+      if (gcpRefreshEnc !== undefined)  { sets.push("gcp_blogger_refresh_token_enc = ?");       binds.push(gcpRefreshEnc);
+                                          sets.push("gcp_blogger_token_expires_at = 0"); }
       sets.push("updated_at = strftime('%s','now')");
       await env.DB.prepare(`UPDATE user_credentials SET ${sets.join(", ")} WHERE user_id = ?`)
         .bind(...binds, userId).run();
     } else {
       await env.DB.prepare(
         `INSERT INTO user_credentials
-         (user_id, github_token_enc, gcp_blogger_token_enc, cf_global_api_key_enc,
+         (user_id, github_token_enc, gcp_blogger_token_enc, cf_global_api_key_enc, cf_api_token_enc,
           cf_account_email, cf_account_id,
           gcp_blogger_client_id, gcp_blogger_client_secret_enc, gcp_blogger_refresh_token_enc,
           gcp_blogger_token_expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
       ).bind(
         userId,
-        githubEnc || null, gcpEnc || null, cfKeyEnc || null,
+        githubEnc || null, gcpEnc || null, cfKeyEnc || null, cfApiTokenEnc || null,
         cfAccountEmail || null, cfAccountId || null,
         gcpClientId || null, gcpSecretEnc || null, gcpRefreshEnc || null,
       ).run();
@@ -344,34 +348,20 @@ async function handleApi(request, env, url) {
       await gh.createRepo(githubToken, repoName);
       const repoFullName = `${ghUser.login}/${repoName}`;
 
-      // 2) 워크플로우 파일 로드
-      const [provisionYml, syncYml] = await Promise.all([
-        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
-          .then(r => { if (!r.ok) throw new Error(`provision.yml 로드 실패: ${r.status}`); return r.text(); }),
-        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/sync.yml"))
-          .then(r => { if (!r.ok) throw new Error(`sync.yml 로드 실패: ${r.status}`); return r.text(); }),
-      ]);
-
-      // 워크플로우 파일 업로드 (순서 보장)
-      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
-      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
-
-      // 3) provision 워크플로우 실행
-      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 약 3초 대기 (race condition 방지)
-      await new Promise(r => setTimeout(r, 3000));
-      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
-        site_name: site.site_slug,
-        site_display_name: site.site_name,
-      });
-
-      // 4) Cloudflare 프록시 워커 배포
+      // 2) Cloudflare 계정 ID 확보 + 프록시 워커 배포
+      // (provision 워크플로우 dispatch 전에 먼저 확보해야 secret inputs에 포함 가능)
       let accountId = cred.cf_account_id;
       if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
       const workerName = `wpspot-${site.site_slug}`;
       const wpOrigin = `https://${repoName}.pages.dev`;
       const workerUrl = await cf.deployProxyWorker(cred.cf_account_email, cfKey, accountId, workerName, wpOrigin);
 
-      // 5) Blogspot 템플릿 적용
+      if (!cred.cf_account_id) {
+        await env.DB.prepare("UPDATE user_credentials SET cf_account_id = ? WHERE user_id = ?")
+          .bind(accountId, userId).run();
+      }
+
+      // 3) Blogspot 템플릿 적용
       const templateResult = await blogger.setProxyTemplate(bloggerToken, site.blogger_blog_id, workerUrl);
       const blogInfo = await blogger.getBlog(bloggerToken, site.blogger_blog_id).catch(() => null);
 
@@ -379,10 +369,37 @@ async function handleApi(request, env, url) {
         `UPDATE sites SET status = 'active', github_repo = ?, cf_worker_name = ?, cf_worker_url = ?, blogger_blog_url = ?, updated_at = strftime('%s','now') WHERE id = ?`
       ).bind(repoFullName, workerName, workerUrl, blogInfo?.url || null, siteId).run();
 
-      if (!cred.cf_account_id) {
-        await env.DB.prepare("UPDATE user_credentials SET cf_account_id = ? WHERE user_id = ?")
-          .bind(accountId, userId).run();
-      }
+      // 4) 워크플로우 파일 로드 및 업로드
+      const [provisionYml, syncYml] = await Promise.all([
+        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
+          .then(r => { if (!r.ok) throw new Error(`provision.yml 로드 실패: ${r.status}`); return r.text(); }),
+        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/sync.yml"))
+          .then(r => { if (!r.ok) throw new Error(`sync.yml 로드 실패: ${r.status}`); return r.text(); }),
+      ]);
+
+      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
+      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
+
+      // 5) provision 워크플로우 실행 (Secret 값을 inputs로 전달 → 러너가 gh secret set으로 등록)
+      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 약 3초 대기 (race condition 방지)
+      await new Promise(r => setTimeout(r, 3000));
+
+      // CF_API_TOKEN은 wrangler.toml 기반 배포에 필요. 계정에 저장된 값 사용.
+      // 없으면 빈 문자열 전달 (나중에 수동 등록 안내)
+      const cfApiTokenPlain = cred.cf_api_token_enc
+        ? await decryptSecret(env, cred.cf_api_token_enc).catch(() => "")
+        : "";
+
+      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
+        site_name: site.site_slug,
+        site_display_name: site.site_name,
+        // Secret 자동 등록용 inputs (HTTPS 전송, 러너에서 즉시 ::add-mask:: 처리)
+        secret_cf_worker_url: workerUrl,
+        secret_cf_account_id: accountId,
+        secret_cf_api_token: cfApiTokenPlain,
+        secret_gcp_blogger_token: bloggerToken,
+        secret_blog_id: site.blogger_blog_id || "",
+      });
 
       // 6) 호스팅 접속 정보 생성
       const existingCred = await env.DB.prepare("SELECT site_id FROM site_credentials WHERE site_id = ?").bind(siteId).first();
@@ -413,14 +430,6 @@ async function handleApi(request, env, url) {
         "UPDATE site_jobs SET status = 'success', message = ?, finished_at = strftime('%s','now') WHERE id = ?"
       ).bind("프로비저닝 완료", jobId).run();
 
-      // 응답에 GitHub Actions Secrets 설정 안내 포함
-      const requiredSecrets = {
-        CF_WORKER_URL: workerUrl,
-        CF_ACCOUNT_ID: accountId,
-        CF_API_TOKEN: "(Cloudflare API Token — Pages:Edit 권한 필요)",
-        GCP_BLOGGER_TOKEN: "(Blogger OAuth Access Token)",
-        BLOG_ID: site.blogger_blog_id || "(Blogspot Blog ID)",
-      };
       return json({
         ok: true,
         workerUrl,
@@ -428,8 +437,10 @@ async function handleApi(request, env, url) {
         bloggerTemplateApplied: templateResult.templateApplied,
         bloggerTemplateNote: templateResult.note,
         bloggerTemplateXml: templateResult.templateApplied ? undefined : templateResult.xml,
-        nextStep: "GitHub 레포 Settings → Secrets and variables → Actions에 아래 Secrets를 등록하세요.",
-        requiredSecrets,
+        secretsAutoRegistered: true,
+        nextStep: cfApiTokenPlain
+          ? "GitHub Actions Secrets가 자동 등록됐습니다. provision 워크플로우가 완료되면 사이트가 활성화됩니다."
+          : "CF_API_TOKEN(Cloudflare API Token)은 자동 등록되지 않았습니다. GitHub 레포 Settings → Secrets → Actions에서 CF_API_TOKEN을 수동으로 등록해주세요.",
       });
     } catch (e) {
       console.error("Provision error:", e.message, e.stack);
