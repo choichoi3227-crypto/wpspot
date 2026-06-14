@@ -2,63 +2,315 @@ name: wpspot nginx Keep-Alive
 
 on:
   schedule:
-    # 5분마다 실행 (15개 parallel job × 20초 offset = 항상 활성)
+    # 5분마다 실행
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
+  # ── 공통 setup 역할: WP/PLA 서버 복원 + IP 재등록 ──────────────────────
   keepalive-0:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      runner_ip: ${{ steps.ip.outputs.ip }}
     steps:
-      - name: PHP-FPM + nginx 시작 및 유지
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 런너 외부 IP 확인 (localhost 절대 금지)
+        id: ip
         run: |
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 php8.3-mbstring 2>/dev/null || true
-          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
-          # 300초(5분) 동안 유지 (다음 cron 트리거 전까지)
-          echo "Keep-alive 시작: $(date)"
-          sleep 280
-          echo "Keep-alive 종료: $(date)"
+          RUNNER_IP=""
+          for svc in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipecho.net/plain" "https://icanhazip.com"; do
+            RUNNER_IP=$(curl -sf --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]' || true)
+            if [[ "$RUNNER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "외부 IP: $RUNNER_IP"
+              break
+            fi
+            RUNNER_IP=""
+          done
+          if [ -z "$RUNNER_IP" ]; then
+            echo "::error::외부 IP 확인 실패. localhost 사용 금지."
+            exit 1
+          fi
+          echo "ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
+          echo "RUNNER_EXTERNAL_IP=$RUNNER_IP" >> "$GITHUB_ENV"
+
+      - name: PHP 8.3 + nginx 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 php8.3-mbstring \
+            php8.3-gd php8.3-zip php8.3-curl php8.3-xml php8.3-intl php8.3-opcache 2>/dev/null || true
+
+      - name: nginx + PHP-FPM 설정 복원 및 시작
+        run: |
+          # deploy/ 디렉터리에 저장된 설정 파일 복원
+          if [ -f deploy/nginx/wordpress.conf ]; then
+            sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf
+            sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          fi
+          if [ -f deploy/nginx/phpliteadmin.conf ]; then
+            sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf
+            sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          fi
+          sudo rm -f /etc/nginx/sites-enabled/default
+          if [ -f deploy/php-fpm/www.conf ]; then
+            sudo cp deploy/php-fpm/www.conf /etc/php/8.3/fpm/pool.d/www.conf
+          fi
+          # wordpress 파일 권한 복원
+          if [ -d wordpress ]; then
+            sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+            sudo chmod -R 755 wordpress/ 2>/dev/null || true
+            sudo chmod -R 770 wordpress/wp-content/ 2>/dev/null || true
+          fi
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "nginx + PHP-FPM 복원 완료: $(date)"
+
+      - name: Cloudflare Worker NGINX_ORIGIN 업데이트
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          RUNNER_IP="${{ steps.ip.outputs.ip }}"
+          CF_WORKER_NAME=$(basename "${{ secrets.CF_WORKER_URL || '' }}" ".workers.dev" 2>/dev/null || echo "")
+          if [ -z "$CF_WORKER_NAME" ]; then
+            echo "⚠ CF_WORKER_URL Secret 미설정 — Worker 변수 업데이트 건너뜀"
+            exit 0
+          fi
+          # Workers 환경변수 업데이트 (NGINX_ORIGIN = 새 런너 외부 IP)
+          UPDATE_RESULT=$(curl -sf -X PATCH \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${CF_WORKER_NAME}/settings" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"bindings\":[{\"type\":\"plain_text\",\"name\":\"NGINX_ORIGIN\",\"text\":\"http://${RUNNER_IP}\"}]}" \
+            2>/dev/null || echo "{}")
+          echo "WordPress Worker 업데이트: $UPDATE_RESULT"
+          # PMA Worker도 업데이트
+          PMA_WORKER_NAME="${CF_WORKER_NAME}-pma"
+          UPDATE_PMA=$(curl -sf -X PATCH \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${PMA_WORKER_NAME}/settings" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"bindings\":[{\"type\":\"plain_text\",\"name\":\"PLA_ORIGIN\",\"text\":\"http://${RUNNER_IP}:8080\"}]}" \
+            2>/dev/null || echo "{}")
+          echo "PHPLiteAdmin Worker 업데이트: $UPDATE_PMA"
+
+      - name: 외부 IP로 동작 확인 (localhost 금지)
+        run: |
+          RUNNER_IP="${{ steps.ip.outputs.ip }}"
+          sleep 2
+          WP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://${RUNNER_IP}/" || echo "000")
+          PLA_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://${RUNNER_IP}:8080/" || echo "000")
+          echo "WordPress  (http://${RUNNER_IP}/): HTTP ${WP_STATUS}"
+          echo "PHPLiteAdmin (http://${RUNNER_IP}:8080/): HTTP ${PLA_STATUS}"
+          echo "Keep-alive-0 완료: $(date)"
+          # 이 job이 종료되면 5분마다 재시작이 보장됨
+          # 나머지 job들이 20초 간격으로 오버랩하여 연속성 확보
+          sleep 250
 
   keepalive-1:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Keep-alive offset 20s
         run: |
           sleep 20
           sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
           echo "Keep-alive-1: $(date)"
-          sleep 260
+          sleep 230
 
   keepalive-2:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Keep-alive offset 40s
         run: |
           sleep 40
           sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
           echo "Keep-alive-2: $(date)"
-          sleep 240
+          sleep 210
 
   keepalive-3:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Keep-alive offset 60s
         run: |
           sleep 60
           sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
           echo "Keep-alive-3: $(date)"
-          sleep 220
+          sleep 190
 
   keepalive-4:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Keep-alive offset 80s
         run: |
           sleep 80
           sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
           echo "Keep-alive-4: $(date)"
+          sleep 170
+
+  keepalive-5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 100s
+        run: |
+          sleep 100
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-5: $(date)"
+          sleep 150
+
+  keepalive-6:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 120s
+        run: |
+          sleep 120
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-6: $(date)"
+          sleep 130
+
+  keepalive-7:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 140s
+        run: |
+          sleep 140
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-7: $(date)"
+          sleep 110
+
+  keepalive-8:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 160s
+        run: |
+          sleep 160
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-8: $(date)"
+          sleep 90
+
+  keepalive-9:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 180s
+        run: |
+          sleep 180
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-9: $(date)"
+          sleep 70
+
+  keepalive-10:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 200s
+        run: |
           sleep 200
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-10: $(date)"
+          sleep 50
+
+  keepalive-11:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 220s
+        run: |
+          sleep 220
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-11: $(date)"
+          sleep 30
+
+  keepalive-12:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep-alive offset 240s
+        run: |
+          sleep 240
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
+          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
+          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
+          echo "Keep-alive-12: $(date)"
+          sleep 10
