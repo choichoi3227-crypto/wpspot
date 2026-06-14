@@ -37,7 +37,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # git push
-      secrets: write    # gh secret set
 
     steps:
       - name: 체크아웃
