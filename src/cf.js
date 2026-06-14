@@ -111,7 +111,25 @@ function buildWorkerScript(origin) {
       redirect: "manual",
     };
 
-    const resp = await fetch(target.toString(), init);
+    let resp;
+    try {
+      resp = await fetch(target.toString(), init);
+    } catch (e) {
+      // origin이 아직 배포 중이거나 DNS 미준비 상태
+      return new Response(buildLoadingHtml(${JSON.stringify(origin)}), {
+        status: 503,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Retry-After": "30" },
+      });
+    }
+
+    // Pages 빌드 진행 중(523/524/530) 또는 DNS 에러(1016 등)
+    if (resp.status === 523 || resp.status === 524 || resp.status === 530 || resp.status === 404 && resp.headers.get("server") === "cloudflare") {
+      return new Response(buildLoadingHtml(${JSON.stringify(origin)}), {
+        status: 503,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Retry-After": "30" },
+      });
+    }
+
     const contentType = resp.headers.get("content-type") || "";
 
     if (
@@ -133,6 +151,37 @@ function buildWorkerScript(origin) {
     if (loc) outHeaders.set("location", loc.replace(target.origin, url.origin));
     return new Response(resp.body, { status: resp.status, headers: outHeaders });
   }
+};
+
+function buildLoadingHtml(origin) {
+  return \`<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>사이트 준비 중 — wpspot</title>
+<meta http-equiv="refresh" content="30">
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc;color:#334155;}
+  .box{text-align:center;max-width:420px;padding:2rem;}
+  .spinner{width:48px;height:48px;border:4px solid #e2e8f0;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1.5rem;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  h1{font-size:1.25rem;font-weight:600;margin:0 0 .5rem}
+  p{font-size:.9rem;color:#64748b;margin:.5rem 0}
+  small{font-size:.75rem;color:#94a3b8}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="spinner"></div>
+  <h1>사이트를 배포하는 중이에요</h1>
+  <p>Cloudflare Pages 초기 배포가 완료되면 자동으로 표시됩니다.<br>보통 1~3분 정도 걸려요.</p>
+  <p><small>이 페이지는 30초마다 자동으로 새로고침 됩니다.</small></p>
+  <p><small>원본: \${origin}</small></p>
+</div>
+</body>
+</html>\`;
 }`;
+}
 }
 
