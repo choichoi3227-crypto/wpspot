@@ -12,12 +12,16 @@ CREATE TABLE IF NOT EXISTS users (
 -- 사용자 API 키/토큰 (AES-256-GCM 암호화 저장)
 CREATE TABLE IF NOT EXISTS user_credentials (
   user_id TEXT PRIMARY KEY,
-  github_token_enc TEXT,           -- GitHub Personal Access Token (repo+workflow 권한)
-  gcp_blogger_token_enc TEXT,      -- GCP Blogger API OAuth refresh token
-  cf_global_api_key_enc TEXT,      -- Cloudflare Global API Key
-  cf_api_token_enc TEXT,           -- Cloudflare API Token (Pages 배포용, Pages:Edit 권한)
-  cf_account_email TEXT,           -- Cloudflare 계정 이메일
-  cf_account_id TEXT,              -- Cloudflare Account ID
+  github_token_enc TEXT,                   -- GitHub Personal Access Token (repo+workflow 권한)
+  gcp_blogger_token_enc TEXT,              -- GCP Blogger API OAuth Access Token
+  gcp_blogger_refresh_token_enc TEXT,      -- GCP Blogger OAuth Refresh Token (자동 갱신용)
+  gcp_blogger_client_id TEXT,              -- GCP OAuth Client ID
+  gcp_blogger_client_secret_enc TEXT,      -- GCP OAuth Client Secret
+  gcp_blogger_token_expires_at INTEGER,    -- Access Token 만료 unix timestamp
+  cf_global_api_key_enc TEXT,              -- Cloudflare Global API Key
+  cf_api_token_enc TEXT,                   -- Cloudflare API Token (Pages 배포용, Pages:Edit 권한)
+  cf_account_email TEXT,                   -- Cloudflare 계정 이메일
+  cf_account_id TEXT,                      -- Cloudflare Account ID
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
