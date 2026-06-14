@@ -147,9 +147,25 @@
         const label = action === "provision" ? "프로비저닝" : "동기화";
         try {
           wpspot.toast(`${label}을 시작했어요`);
-          await wpspot.api(`/api/sites/${site.id}/${action}`, { method: "POST" });
-          wpspot.toast(`${label} 요청이 완료됐어요`);
-          loadSites();
+          const result = await wpspot.api(`/api/sites/${site.id}/${action}`, { method: "POST" });
+
+          // provision의 경우: 워크플로우 dispatch를 10초 후 별도 호출
+          // (GitHub Actions 인덱싱 딜레이로 인한 422 방지)
+          if (action === "provision" && result?.needsDispatch) {
+            wpspot.toast("레포지토리 생성 완료. 10초 후 워크플로우를 실행합니다...");
+            setTimeout(async () => {
+              try {
+                await wpspot.api(`/api/sites/${site.id}/provision-dispatch`, { method: "POST" });
+                wpspot.toast("GitHub Actions 워크플로우가 실행됐어요!");
+              } catch (dispatchErr) {
+                wpspot.toast(`워크플로우 실행 실패: ${dispatchErr.message}`);
+              }
+              loadSites();
+            }, 10000);
+          } else {
+            wpspot.toast(`${label} 요청이 완료됐어요`);
+            loadSites();
+          }
         } catch (err) {
           wpspot.toast(err.message);
           loadSites();
