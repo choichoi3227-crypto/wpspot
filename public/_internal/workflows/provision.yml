@@ -10,13 +10,74 @@ on:
         description: "wpspot 사이트 표시 이름"
         required: false
         default: ""
+      # Secret 자동 등록용 inputs (HTTPS로만 전달되며 러너에서 즉시 마스킹됨)
+      secret_cf_worker_url:
+        description: "CF_WORKER_URL (자동 주입)"
+        required: false
+        default: ""
+      secret_cf_account_id:
+        description: "CF_ACCOUNT_ID (자동 주입)"
+        required: false
+        default: ""
+      secret_cf_api_token:
+        description: "CF_API_TOKEN (자동 주입)"
+        required: false
+        default: ""
+      secret_gcp_blogger_token:
+        description: "GCP_BLOGGER_TOKEN (자동 주입)"
+        required: false
+        default: ""
+      secret_blog_id:
+        description: "BLOG_ID (자동 주입)"
+        required: false
+        default: ""
 
 jobs:
   provision:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # git push
+      secrets: write    # gh secret set
+
     steps:
       - name: 체크아웃
         uses: actions/checkout@v4
+
+      # ── Secret 자동 등록 (가장 먼저 실행, 이후 단계에서 사용) ──────────────
+      - name: GitHub Actions Secrets 자동 등록
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          _CF_WORKER_URL: ${{ inputs.secret_cf_worker_url }}
+          _CF_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
+          _CF_API_TOKEN: ${{ inputs.secret_cf_api_token }}
+          _GCP_BLOGGER_TOKEN: ${{ inputs.secret_gcp_blogger_token }}
+          _BLOG_ID: ${{ inputs.secret_blog_id }}
+        run: |
+          # 값을 로그에서 마스킹
+          echo "::add-mask::$_CF_WORKER_URL"
+          echo "::add-mask::$_CF_ACCOUNT_ID"
+          echo "::add-mask::$_CF_API_TOKEN"
+          echo "::add-mask::$_GCP_BLOGGER_TOKEN"
+          echo "::add-mask::$_BLOG_ID"
+
+          REPO="${{ github.repository }}"
+
+          set_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              printf '%s' "$value" | gh secret set "$name" --repo "$REPO"
+              echo "✓ Secret 등록: $name"
+            else
+              echo "⚠ 값 없음, 건너뜀: $name"
+            fi
+          }
+
+          set_secret CF_WORKER_URL      "$_CF_WORKER_URL"
+          set_secret CF_ACCOUNT_ID      "$_CF_ACCOUNT_ID"
+          set_secret CF_API_TOKEN       "$_CF_API_TOKEN"
+          set_secret GCP_BLOGGER_TOKEN  "$_GCP_BLOGGER_TOKEN"
+          set_secret BLOG_ID            "$_BLOG_ID"
 
       - name: PHP 설치 (8.3)
         uses: shivammathur/setup-php@v2
@@ -57,16 +118,13 @@ jobs:
           cd wordpress
           if [ ! -f wp-config.php ]; then
             cp wp-config-sample.php wp-config.php
-            # DB_DIR / DB_FILE (SQLite integration)
             sed -i "s/define( 'DB_NAME'.*/define( 'DB_NAME', 'wordpress' );/" wp-config.php
             sed -i "s/define( 'DB_USER'.*/define( 'DB_USER', 'root' );/" wp-config.php
             sed -i "s/define( 'DB_PASSWORD'.*/define( 'DB_PASSWORD', '' );/" wp-config.php
             sed -i "/define( 'DB_HOST'/a define('DB_DIR', __DIR__ . '/wp-content/database/');\ndefine('DB_FILE', 'wordpress.db');" wp-config.php
             mkdir -p wp-content/database
-            # Salt 주입 (실패해도 계속)
             SALT=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || echo "")
             if [ -n "$SALT" ]; then
-              # 기존 placeholder 제거 후 삽입
               sed -i "/AUTH_KEY/d;/SECURE_AUTH_KEY/d;/LOGGED_IN_KEY/d;/NONCE_KEY/d;/AUTH_SALT/d;/SECURE_AUTH_SALT/d;/LOGGED_IN_SALT/d;/NONCE_SALT/d" wp-config.php
               echo "$SALT" >> wp-config.php
             fi
@@ -136,7 +194,6 @@ jobs:
         run: |
           set -e
           mkdir -p dist
-          # wp-content/database는 공개 배포에서 제외
           rsync -a --exclude='wp-content/database/' wordpress/ dist/
           echo "wpspot static bundle for ${{ inputs.site_name }}" > dist/_wpspot.txt
 
@@ -147,7 +204,6 @@ jobs:
         run: |
           set -e
           npm install -g wrangler
-          # 프로젝트가 없으면 생성
           wrangler pages project create "wpspot-${{ inputs.site_name }}" --production-branch main 2>/dev/null || true
           wrangler pages deploy dist \
             --project-name "wpspot-${{ inputs.site_name }}" \
