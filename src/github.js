@@ -21,7 +21,9 @@ function toBase64(str) {
   return btoa(bin);
 }
 
-// 사용자 계정에 새 레포 생성 (auto_init: false — 워크플로우 포함 첫 커밋을 직접 올림)
+// 사용자 계정에 새 레포 생성
+// auto_init: true — README로 첫 커밋을 만들어 Git 저장소를 즉시 초기화함.
+// blob/tree API는 커밋이 하나라도 있어야 동작하므로 반드시 true여야 한다.
 export async function createRepo(token, repoName) {
   const res = await fetch(`${GITHUB_API}/user/repos`, {
     method: "POST",
@@ -29,7 +31,7 @@ export async function createRepo(token, repoName) {
     body: JSON.stringify({
       name: repoName,
       private: true,
-      auto_init: false,  // 직접 첫 커밋을 올리기 위해 false
+      auto_init: true,   // Git 저장소를 즉시 초기화 (blob API 사용 가능 상태로)
       description: "wpspot - WordPress-style Blogspot hosting (headless WordPress backend)",
     }),
   });
@@ -37,13 +39,7 @@ export async function createRepo(token, repoName) {
     const text = await res.text();
     throw new Error(`GitHub 레포 생성 실패: ${res.status} ${text}`);
   }
-  const data = await res.json().catch(() => ({}));
-
-  // 레포 생성 직후 GitHub 내부 초기화가 완료될 때까지 잠시 대기
-  // (너무 빠르게 blob API를 호출하면 409 "Git Repository is empty" 에러 발생)
-  await new Promise(r => setTimeout(r, 2000));
-
-  return data;
+  return res.json().catch(() => ({}));
 }
 
 // 로그인한 사용자 정보
@@ -55,39 +51,37 @@ export async function getAuthenticatedUser(token) {
 
 // Git Tree API를 이용해 여러 파일을 한 번의 커밋으로 올림
 // files: [{ path, content }]  (content는 UTF-8 문자열)
-// 레포가 완전히 비어 있는 상태(첫 커밋)에도 동작함
+// auto_init:true 로 생성된 레포(README 초기 커밋 존재)에서 동작함.
+// 기존 README 등 auto_init 파일은 새 트리에 포함되지 않으므로 자동으로 제거됨.
 export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
   const base = `${GITHUB_API}/repos/${owner}/${repo}`;
 
-  // blob 생성 헬퍼 — 빈 레포 초기화 지연으로 인한 409 에러를 재시도로 처리
-  async function createBlob(path, content, retries = 5, delayMs = 2000) {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      const res = await fetch(`${base}/git/blobs`, {
-        method: "POST",
-        headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-        body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return { path, sha: data.sha };
-      }
-      const text = await res.text();
-      // 409: 레포 Git 내부 초기화가 아직 완료되지 않은 경우 — 재시도
-      if (res.status === 409 && attempt < retries) {
-        await new Promise(r => setTimeout(r, delayMs * attempt));
-        continue;
-      }
-      throw new Error(`blob 생성 실패 (${path}): ${res.status} ${text}`);
-    }
+  // 1) main 브랜치의 현재 HEAD SHA 조회 (auto_init이 만든 첫 커밋)
+  const refRes = await fetch(`${base}/git/ref/heads/main`, { headers: ghHeaders(token) });
+  if (!refRes.ok) {
+    const text = await refRes.text();
+    throw new Error(`HEAD ref 조회 실패: ${refRes.status} ${text}`);
   }
+  const refData = await refRes.json();
+  const parentSha = refData.object.sha;
 
-  // 1) 각 파일을 blob으로 생성 (순차 처리 — 병렬 시 409 가능성 증가)
+  // 2) 각 파일을 blob으로 생성 (순차 처리 — 병렬 시 일부 서버에서 경합 발생 가능)
   const blobs = [];
   for (const { path, content } of files) {
-    blobs.push(await createBlob(path, content));
+    const res = await fetch(`${base}/git/blobs`, {
+      method: "POST",
+      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`blob 생성 실패 (${path}): ${res.status} ${text}`);
+    }
+    const data = await res.json();
+    blobs.push({ path, sha: data.sha });
   }
 
-  // 2) tree 생성 (base_tree 없음 = 완전 새 트리)
+  // 3) tree 생성 (base_tree 없음 = README 등 auto_init 파일을 포함하지 않는 완전 새 트리)
   const treeRes = await fetch(`${base}/git/trees`, {
     method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
@@ -106,14 +100,14 @@ export async function createInitialCommit(token, owner, repo, files, message = "
   }
   const tree = await treeRes.json();
 
-  // 3) 커밋 생성 (parent 없음 = 최초 커밋)
+  // 4) 커밋 생성 (parent = auto_init 첫 커밋)
   const commitRes = await fetch(`${base}/git/commits`, {
     method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify({
       message,
       tree: tree.sha,
-      // parents: []  — 생략하면 orphan commit (GitHub이 첫 커밋으로 인식)
+      parents: [parentSha],
     }),
   });
   if (!commitRes.ok) {
@@ -122,19 +116,15 @@ export async function createInitialCommit(token, owner, repo, files, message = "
   }
   const commit = await commitRes.json();
 
-  // 4) main 브랜치 생성 및 커밋 참조 설정
-  const refRes = await fetch(`${base}/git/refs`, {
-    method: "POST",
+  // 5) main 브랜치를 새 커밋으로 force-update
+  const updateRefRes = await fetch(`${base}/git/refs/heads/main`, {
+    method: "PATCH",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ref: "refs/heads/main",
-      sha: commit.sha,
-    }),
+    body: JSON.stringify({ sha: commit.sha, force: true }),
   });
-  if (!refRes.ok && refRes.status !== 422) {
-    // 422 = 이미 브랜치 존재 (재시도 시 무시)
-    const text = await refRes.text();
-    throw new Error(`브랜치 생성 실패: ${refRes.status} ${text}`);
+  if (!updateRefRes.ok) {
+    const text = await updateRefRes.text();
+    throw new Error(`브랜치 업데이트 실패: ${updateRefRes.status} ${text}`);
   }
 
   return commit;
