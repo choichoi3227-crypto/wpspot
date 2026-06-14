@@ -31,7 +31,7 @@ jobs:
         run: node scripts/blogger-sync.js
 
       - name: 블로그스팟 템플릿 주기적 재동기화 (keep-alive 겸)
-        if: ${{ github.event_name == 'schedule' && secrets.BLOG_ID != '' }}
+        if: ${{ github.event_name == 'schedule' }}
         env:
           GCP_BLOGGER_TOKEN: ${{ secrets.GCP_BLOGGER_TOKEN }}
           BLOG_ID: ${{ secrets.BLOG_ID }}
