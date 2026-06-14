@@ -6,3 +6,6 @@ ALTER TABLE user_credentials ADD COLUMN gcp_blogger_client_id TEXT;
 ALTER TABLE user_credentials ADD COLUMN gcp_blogger_client_secret_enc TEXT;
 ALTER TABLE user_credentials ADD COLUMN gcp_blogger_token_expires_at INTEGER;
 
+
+-- v3: cf_api_token_enc 컬럼 추가 (Cloudflare API Token, Pages:Edit 권한)
+ALTER TABLE user_credentials ADD COLUMN cf_api_token_enc TEXT;
