@@ -372,7 +372,7 @@ async function handleApi(request, env, url) {
       const workerUrl = await cf.deployProxyWorker(cred.cf_account_email, cfKey, accountId, workerName, wpOrigin);
 
       // 5) Blogspot 템플릿 적용
-      await blogger.setProxyTemplate(bloggerToken, site.blogger_blog_id, workerUrl);
+      const templateResult = await blogger.setProxyTemplate(bloggerToken, site.blogger_blog_id, workerUrl);
       const blogInfo = await blogger.getBlog(bloggerToken, site.blogger_blog_id).catch(() => null);
 
       await env.DB.prepare(
@@ -419,11 +419,15 @@ async function handleApi(request, env, url) {
         CF_ACCOUNT_ID: accountId,
         CF_API_TOKEN: "(Cloudflare API Token — Pages:Edit 권한 필요)",
         GCP_BLOGGER_TOKEN: "(Blogger OAuth Access Token)",
+        BLOG_ID: site.blogger_blog_id || "(Blogspot Blog ID)",
       };
       return json({
         ok: true,
         workerUrl,
         githubRepo: repoFullName,
+        bloggerTemplateApplied: templateResult.templateApplied,
+        bloggerTemplateNote: templateResult.note,
+        bloggerTemplateXml: templateResult.templateApplied ? undefined : templateResult.xml,
         nextStep: "GitHub 레포 Settings → Secrets and variables → Actions에 아래 Secrets를 등록하세요.",
         requiredSecrets,
       });
@@ -500,7 +504,7 @@ async function handleApi(request, env, url) {
 
     return json({
       token: tokenRow.token,
-      url: `https://phpmyadmin.cloud-press.co.kr/${tokenRow.token}/`,
+      url: `/phpmyadmin-lite.html?token=${tokenRow.token}`,
       expiresAt: tokenRow.expires_at,
     });
   }
@@ -595,7 +599,7 @@ async function handleApi(request, env, url) {
       pmaToken = { token: newToken };
     }
 
-    const pmaUrl = `https://phpmyadmin.cloud-press.co.kr/${pmaToken.token}/`;
+    const pmaUrl = `/phpmyadmin-lite.html?token=${pmaToken.token}`;
 
     return json({
       provisioned: true,
@@ -789,4 +793,5 @@ async function handleApi(request, env, url) {
 
   return err("Not found", 404);
 }
+
 
