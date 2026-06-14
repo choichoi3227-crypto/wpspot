@@ -80,7 +80,7 @@ export function slugify(name) {
 export async function initWpSchema(DB, siteId, siteName, siteUrl, blogUrl) {
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
-  // wp_options 기본값 삽입
+  // wp_options 기본값 삽입 (UPSERT: 이미 있으면 덮어쓰기)
   const defaultOptions = [
     ["siteurl", siteUrl || ""],
     ["blogname", siteName],
@@ -104,21 +104,118 @@ export async function initWpSchema(DB, siteId, siteName, siteUrl, blogUrl) {
       options: "internal_db",
       users: "internal_db",
     })],
+    // WordPress 필수 옵션들
+    ["default_comment_status", "open"],
+    ["default_ping_status", "open"],
+    ["blogpublic", "1"],
+    ["default_category", "1"],
+    ["show_on_front", "posts"],
+    ["upload_path", ""],
+    ["upload_url_path", ""],
   ];
 
   for (const [name, value] of defaultOptions) {
     await DB.prepare(
-      "INSERT INTO wp_options (site_id, option_name, option_value) VALUES (?, ?, ?) ON CONFLICT(site_id, option_name) DO NOTHING"
-    ).bind(siteId, name, value).run().catch(() => {});
+      `INSERT INTO wp_options (site_id, option_name, option_value)
+       VALUES (?, ?, ?)
+       ON CONFLICT(site_id, option_name) DO UPDATE SET option_value = excluded.option_value`
+    ).bind(siteId, name, value).run().catch((e) => {
+      console.error(`wp_options insert 실패 (${name}):`, e.message);
+    });
   }
 
-  // wp_users 기본 관리자
-  const existing = await DB.prepare("SELECT ID FROM wp_users WHERE site_id = ? LIMIT 1").bind(siteId).first().catch(() => null);
-  if (!existing) {
-    await DB.prepare(
+  // wp_users 기본 관리자 삽입 (없을 때만)
+  const existingUser = await DB.prepare(
+    "SELECT ID FROM wp_users WHERE site_id = ? LIMIT 1"
+  ).bind(siteId).first().catch(() => null);
+
+  let adminUserId = existingUser?.ID;
+
+  if (!existingUser) {
+    const insertResult = await DB.prepare(
       `INSERT INTO wp_users
-       (site_id, user_login, user_pass, user_nicename, user_email, user_registered, display_name)
-       VALUES (?, 'admin', '', 'admin', '', ?, '관리자')`
-    ).bind(siteId, now).run().catch(() => {});
+       (site_id, user_login, user_pass, user_nicename, user_email,
+        user_url, user_registered, display_name, user_status)
+       VALUES (?, 'admin', '', 'admin', '', ?, ?, '관리자', 0)`
+    ).bind(siteId, siteUrl || "", now).run().catch((e) => {
+      console.error("wp_users insert 실패:", e.message);
+      return null;
+    });
+
+    // 삽입된 admin의 ID 조회
+    if (insertResult) {
+      const newUser = await DB.prepare(
+        "SELECT ID FROM wp_users WHERE site_id = ? AND user_login = 'admin' LIMIT 1"
+      ).bind(siteId).first().catch(() => null);
+      adminUserId = newUser?.ID;
+    }
+  }
+
+  // wp_usermeta: admin 역할 및 기본 메타 삽입
+  if (adminUserId) {
+    const userMetas = [
+      [adminUserId, "wp_capabilities", 'a:1:{s:13:"administrator";b:1;}'],
+      [adminUserId, "wp_user_level", "10"],
+      [adminUserId, "nickname", "admin"],
+      [adminUserId, "description", ""],
+      [adminUserId, "rich_editing", "true"],
+      [adminUserId, "comment_shortcuts", "false"],
+      [adminUserId, "admin_color", "fresh"],
+      [adminUserId, "use_ssl", "0"],
+      [adminUserId, "show_admin_bar_front", "true"],
+      [adminUserId, "wp_dashboard_quick_press_last_post_id", "0"],
+    ];
+
+    for (const [userId, metaKey, metaValue] of userMetas) {
+      // 이미 있으면 건너뜀
+      const existing = await DB.prepare(
+        "SELECT umeta_id FROM wp_usermeta WHERE site_id = ? AND user_id = ? AND meta_key = ? LIMIT 1"
+      ).bind(siteId, userId, metaKey).first().catch(() => null);
+
+      if (!existing) {
+        await DB.prepare(
+          "INSERT INTO wp_usermeta (site_id, user_id, meta_key, meta_value) VALUES (?, ?, ?, ?)"
+        ).bind(siteId, userId, metaKey, metaValue).run().catch((e) => {
+          console.error(`wp_usermeta insert 실패 (${metaKey}):`, e.message);
+        });
+      }
+    }
+  }
+
+  // wp_terms: 기본 카테고리 삽입
+  const existingTerm = await DB.prepare(
+    "SELECT term_id FROM wp_terms WHERE site_id = ? LIMIT 1"
+  ).bind(siteId).first().catch(() => null);
+
+  let defaultTermId = existingTerm?.term_id;
+
+  if (!existingTerm) {
+    await DB.prepare(
+      "INSERT INTO wp_terms (site_id, name, slug, term_group) VALUES (?, '미분류', 'uncategorized', 0)"
+    ).bind(siteId).run().catch((e) => {
+      console.error("wp_terms insert 실패:", e.message);
+    });
+
+    const newTerm = await DB.prepare(
+      "SELECT term_id FROM wp_terms WHERE site_id = ? AND slug = 'uncategorized' LIMIT 1"
+    ).bind(siteId).first().catch(() => null);
+    defaultTermId = newTerm?.term_id;
+  }
+
+  // wp_term_taxonomy: 기본 카테고리 taxonomy
+  if (defaultTermId) {
+    const existingTax = await DB.prepare(
+      "SELECT term_taxonomy_id FROM wp_term_taxonomy WHERE site_id = ? AND term_id = ? LIMIT 1"
+    ).bind(siteId, defaultTermId).first().catch(() => null);
+
+    if (!existingTax) {
+      await DB.prepare(
+        `INSERT INTO wp_term_taxonomy (site_id, term_id, taxonomy, description, parent, count)
+         VALUES (?, ?, 'category', '', 0, 0)`
+      ).bind(siteId, defaultTermId).run().catch((e) => {
+        console.error("wp_term_taxonomy insert 실패:", e.message);
+      });
+    }
   }
 }
+
