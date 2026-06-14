@@ -255,28 +255,25 @@ async function handleApi(request, env, url) {
       await gh.createRepo(githubToken, repoName);
       const repoFullName = `${ghUser.login}/${repoName}`;
 
-      // 2) 워크플로우 업로드
+      // 2) 워크플로우 파일 로드
       const [provisionYml, syncYml] = await Promise.all([
-        env.ASSETS.fetch(new URL("/_internal/workflows/provision.yml", "https://wpspot.app"))
-          .then(r => r.ok ? r.text() : null).catch(() => null),
-        env.ASSETS.fetch(new URL("/_internal/workflows/sync.yml", "https://wpspot.app"))
-          .then(r => r.ok ? r.text() : null).catch(() => null),
+        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
+          .then(r => { if (!r.ok) throw new Error(`provision.yml 로드 실패: ${r.status}`); return r.text(); }),
+        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/sync.yml"))
+          .then(r => { if (!r.ok) throw new Error(`sync.yml 로드 실패: ${r.status}`); return r.text(); }),
       ]);
 
-      if (provisionYml) {
-        await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
-      }
-      if (syncYml) {
-        await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
-      }
+      // 워크플로우 파일 업로드 (순서 보장)
+      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
+      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
 
       // 3) provision 워크플로우 실행
-      if (provisionYml) {
-        await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
-          site_name: site.site_slug,
-          site_display_name: site.site_name,
-        });
-      }
+      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 약 3초 대기 (race condition 방지)
+      await new Promise(r => setTimeout(r, 3000));
+      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
+        site_name: site.site_slug,
+        site_display_name: site.site_name,
+      });
 
       // 4) Cloudflare 프록시 워커 배포
       let accountId = cred.cf_account_id;
@@ -327,7 +324,20 @@ async function handleApi(request, env, url) {
         "UPDATE site_jobs SET status = 'success', message = ?, finished_at = strftime('%s','now') WHERE id = ?"
       ).bind("프로비저닝 완료", jobId).run();
 
-      return json({ ok: true, workerUrl, githubRepo: repoFullName });
+      // 응답에 GitHub Actions Secrets 설정 안내 포함
+      const requiredSecrets = {
+        CF_WORKER_URL: workerUrl,
+        CF_ACCOUNT_ID: accountId,
+        CF_API_TOKEN: "(Cloudflare API Token — Pages:Edit 권한 필요)",
+        GCP_BLOGGER_TOKEN: "(Blogger OAuth Access Token)",
+      };
+      return json({
+        ok: true,
+        workerUrl,
+        githubRepo: repoFullName,
+        nextStep: "GitHub 레포 Settings → Secrets and variables → Actions에 아래 Secrets를 등록하세요.",
+        requiredSecrets,
+      });
     } catch (e) {
       console.error("Provision error:", e.message, e.stack);
       await env.DB.prepare("UPDATE sites SET status = 'error', updated_at = strftime('%s','now') WHERE id = ?")

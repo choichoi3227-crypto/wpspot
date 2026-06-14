@@ -1,8 +1,6 @@
 // src/cf.js
 // 사용자가 입력한 Cloudflare Global API Key + 계정 이메일/Account ID로
 // "블로그스팟 프록시 워커"를 사용자 자신의 Cloudflare 계정에 생성한다.
-// 이 워커는 워드프레스 원본(GitHub Actions가 배포한 nginx+PHP-FPM 서버리스 환경)을
-// 블로그스팟 프론트엔드 뒤에서 그대로 서빙하는 역할을 한다.
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 
@@ -31,9 +29,7 @@ export async function getAccountId(email, globalApiKey) {
   return data.result[0].id;
 }
 
-// 블로그스팟 ↔ 워드프레스(nginx/PHP-FPM) 프록시 워커 배포
-// 워커는 GitHub Actions로 배포된 사용자의 워드프레스 오리진(예: <repo>.pages.dev 또는
-// 외부 nginx 엔드포인트)으로 모든 요청을 그대로 전달(rewrite)한다.
+// 블로그스팟 ↔ 워드프레스 프록시 워커 배포
 export async function deployProxyWorker(email, globalApiKey, accountId, workerName, origin) {
   const script = buildWorkerScript(origin);
   const url = `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}`;
@@ -54,20 +50,52 @@ export async function deployProxyWorker(email, globalApiKey, accountId, workerNa
   }
 
   // workers.dev 서브도메인 활성화
-  await fetch(`${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/subdomain`, {
-    method: "POST",
-    headers: cfHeadersJson(email, globalApiKey),
-    body: JSON.stringify({ enabled: true }),
-  });
+  const subdomainRes = await fetch(
+    `${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/subdomain`,
+    {
+      method: "POST",
+      headers: cfHeadersJson(email, globalApiKey),
+      body: JSON.stringify({ enabled: true }),
+    }
+  );
+  if (!subdomainRes.ok) {
+    // 이미 활성화된 경우 무시
+    const body = await subdomainRes.json().catch(() => ({}));
+    if (!body?.errors?.some((e) => e.code === 10067)) {
+      // 10067 = already enabled, 그 외 에러는 로그만
+      console.warn("subdomain 활성화 응답:", subdomainRes.status, JSON.stringify(body));
+    }
+  }
 
-  // 계정 서브도메인 조회하여 최종 URL 구성
+  // 계정 서브도메인 조회 (올바른 엔드포인트 사용)
   const subRes = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
     headers: cfHeadersJson(email, globalApiKey),
   });
-  let accountSubdomain = accountId;
+  let accountSubdomain = null;
   if (subRes.ok) {
     const subData = await subRes.json();
-    if (subData.result && subData.result.subdomain) accountSubdomain = subData.result.subdomain;
+    if (subData.result && subData.result.subdomain) {
+      accountSubdomain = subData.result.subdomain;
+    }
+  }
+
+  // 서브도메인 조회 실패 시 Account ID로 폴백 후 재시도 (최초 활성화 직후 지연 발생 가능)
+  if (!accountSubdomain) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const retryRes = await fetch(`${CF_API}/accounts/${accountId}/workers/subdomain`, {
+      headers: cfHeadersJson(email, globalApiKey),
+    });
+    if (retryRes.ok) {
+      const retryData = await retryRes.json();
+      accountSubdomain = retryData.result?.subdomain || null;
+    }
+  }
+
+  if (!accountSubdomain) {
+    throw new Error(
+      "Cloudflare workers.dev 서브도메인을 확인할 수 없습니다. " +
+        "Cloudflare 대시보드 → Workers & Pages → 서브도메인을 먼저 설정해주세요."
+    );
   }
 
   return `https://${workerName}.${accountSubdomain}.workers.dev`;
@@ -88,8 +116,7 @@ async function buildModuleUploadBody(script) {
   return form;
 }
 
-// 프록시 워커 스크립트: 모든 요청을 워드프레스 오리진으로 전달하고
-// 응답 HTML 내 절대 URL을 현재 블로그스팟 도메인 기준으로 재작성한다.
+// 프록시 워커 스크립트
 function buildWorkerScript(origin) {
   return `export default {
   async fetch(request, env, ctx) {
@@ -100,24 +127,41 @@ function buildWorkerScript(origin) {
 
     const init = {
       method: request.method,
-      headers: request.headers,
+      headers: new Headers(request.headers),
       body: ["GET","HEAD"].includes(request.method) ? undefined : request.body,
       redirect: "manual",
     };
+    // Host 헤더를 오리진으로 맞춤 (일부 서버가 Host 검증)
+    init.headers.set("host", target.host);
 
     const resp = await fetch(target.toString(), init);
     const contentType = resp.headers.get("content-type") || "";
 
-    if (contentType.includes("text/html") || contentType.includes("text/css") || contentType.includes("javascript")) {
+    if (
+      contentType.includes("text/html") ||
+      contentType.includes("text/css") ||
+      contentType.includes("javascript")
+    ) {
       let text = await resp.text();
-      // 워드프레스 오리진 절대경로를 현재 접속 도메인으로 재작성
+      // 오리진 절대경로를 현재 접속 도메인으로 재작성
       text = text.split(target.origin).join(url.origin);
       const headers = new Headers(resp.headers);
       headers.delete("content-length");
+      // location 헤더(리다이렉트) 재작성
+      const location = headers.get("location");
+      if (location) {
+        headers.set("location", location.replace(target.origin, url.origin));
+      }
       return new Response(text, { status: resp.status, headers });
     }
 
-    return new Response(resp.body, { status: resp.status, headers: resp.headers });
+    // 바이너리/스트림 응답 그대로 전달
+    const headers = new Headers(resp.headers);
+    const location = headers.get("location");
+    if (location) {
+      headers.set("location", location.replace(target.origin, url.origin));
+    }
+    return new Response(resp.body, { status: resp.status, headers });
   }
 }`;
 }
