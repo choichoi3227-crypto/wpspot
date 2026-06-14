@@ -413,8 +413,9 @@ async function handleApi(request, env, url) {
       await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
 
       // 5) provision 워크플로우 실행 (Secret 값을 inputs로 전달 → 러너가 gh secret set으로 등록)
-      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 약 5초 대기 (race condition 방지)
-      await new Promise(r => setTimeout(r, 5000));
+      // GitHub가 workflow_dispatch 트리거를 인식하기까지 polling으로 대기
+      // (단순 sleep은 "Workflow does not have 'workflow_dispatch' trigger" 422 에러 발생)
+      await gh.waitForWorkflowReady(githubToken, ghUser.login, repoName, "provision.yml");
 
       // CF_API_TOKEN은 wrangler.toml 기반 배포에 필요. 계정에 저장된 값 사용.
       // 없으면 빈 문자열 전달 (나중에 수동 등록 안내)
@@ -812,5 +813,6 @@ async function handleApi(request, env, url) {
 
   return err("Not found", 404);
 }
+
 
 
