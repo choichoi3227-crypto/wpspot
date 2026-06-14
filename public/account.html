@@ -364,6 +364,8 @@
       if (editState.cf) {
         const v = document.getElementById('cfGlobalApiKey').value.trim();
         if (v) body.cfGlobalApiKey = v;
+      }
+      if (editState.cfApiToken) {
         const vt = document.getElementById('cfApiToken').value.trim();
         if (vt) body.cfApiToken = vt;
       }
