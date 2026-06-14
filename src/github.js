@@ -37,7 +37,13 @@ export async function createRepo(token, repoName) {
     const text = await res.text();
     throw new Error(`GitHub 레포 생성 실패: ${res.status} ${text}`);
   }
-  return res.json().catch(() => ({}));
+  const data = await res.json().catch(() => ({}));
+
+  // 레포 생성 직후 GitHub 내부 초기화가 완료될 때까지 잠시 대기
+  // (너무 빠르게 blob API를 호출하면 409 "Git Repository is empty" 에러 발생)
+  await new Promise(r => setTimeout(r, 2000));
+
+  return data;
 }
 
 // 로그인한 사용자 정보
@@ -53,20 +59,33 @@ export async function getAuthenticatedUser(token) {
 export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
   const base = `${GITHUB_API}/repos/${owner}/${repo}`;
 
-  // 1) 각 파일을 blob으로 생성
-  const blobs = await Promise.all(files.map(async ({ path, content }) => {
-    const res = await fetch(`${base}/git/blobs`, {
-      method: "POST",
-      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
-    });
-    if (!res.ok) {
+  // blob 생성 헬퍼 — 빈 레포 초기화 지연으로 인한 409 에러를 재시도로 처리
+  async function createBlob(path, content, retries = 5, delayMs = 2000) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      const res = await fetch(`${base}/git/blobs`, {
+        method: "POST",
+        headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return { path, sha: data.sha };
+      }
       const text = await res.text();
+      // 409: 레포 Git 내부 초기화가 아직 완료되지 않은 경우 — 재시도
+      if (res.status === 409 && attempt < retries) {
+        await new Promise(r => setTimeout(r, delayMs * attempt));
+        continue;
+      }
       throw new Error(`blob 생성 실패 (${path}): ${res.status} ${text}`);
     }
-    const data = await res.json();
-    return { path, sha: data.sha };
-  }));
+  }
+
+  // 1) 각 파일을 blob으로 생성 (순차 처리 — 병렬 시 409 가능성 증가)
+  const blobs = [];
+  for (const { path, content } of files) {
+    blobs.push(await createBlob(path, content));
+  }
 
   // 2) tree 생성 (base_tree 없음 = 완전 새 트리)
   const treeRes = await fetch(`${base}/git/trees`, {
