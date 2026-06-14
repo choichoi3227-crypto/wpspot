@@ -134,10 +134,31 @@ export async function setProxyTemplate(accessToken, blogId, workerUrl) {
   // 블로그 존재 및 권한 확인
   const blog = await getBlog(accessToken, blogId);
   const xml = buildProxyTemplateXml(workerUrl);
+
+  // Blogger API v3: 템플릿 직접 적용
+  const res = await fetch(`${BLOGGER_API}/blogs/${blogId}/templates/blogger`, {
+    method: "PATCH",
+    headers: gHeaders(accessToken),
+    body: JSON.stringify({ template: xml }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    // 권한 오류 등 실패해도 계속 진행 (수동 적용 안내)
+    console.warn(`Blogger 템플릿 자동 적용 실패 (${res.status}): ${text}`);
+    return {
+      xml,
+      blogUrl: blog.url,
+      templateApplied: false,
+      note: `템플릿 자동 적용 실패 (${res.status}). 블로그스팟 대시보드 → 테마 → HTML 편집에서 아래 XML을 붙여넣기 해주세요.`,
+    };
+  }
+
   return {
     xml,
     blogUrl: blog.url,
-    note: "템플릿은 sync 워크플로우(blogger-sync.js)를 통해 적용됩니다.",
+    templateApplied: true,
+    note: "블로그스팟 템플릿이 자동 적용됐습니다.",
   };
 }
 
@@ -187,4 +208,5 @@ function buildProxyTemplateXml(workerUrl) {
 </body>
 </html>`;
 }
+
 
