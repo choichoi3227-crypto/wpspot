@@ -354,7 +354,9 @@ async function handleApi(request, env, url) {
 
     const cred = await env.DB.prepare("SELECT * FROM user_credentials WHERE user_id = ?").bind(userId).first();
     if (!cred?.github_token_enc) return err("내 계정에서 GitHub Token을 먼저 등록해주세요.", 400);
-    if (!cred?.gcp_blogger_token_enc) return err("내 계정에서 GCP(Blogger API) Token을 먼저 등록해주세요.", 400);
+    if (!cred?.gcp_blogger_token_enc && !cred?.gcp_blogger_refresh_token_enc) {
+      return err("내 계정에서 GCP(Blogger API) Token을 먼저 등록해주세요. Google 계정을 연동하거나 Access Token을 직접 입력해주세요.", 400);
+    }
     if (!cred?.cf_global_api_key_enc || !cred?.cf_account_email) {
       return err("내 계정에서 Cloudflare Global API Key와 계정 이메일을 먼저 등록해주세요.", 400);
     }
@@ -411,8 +413,8 @@ async function handleApi(request, env, url) {
       await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
 
       // 5) provision 워크플로우 실행 (Secret 값을 inputs로 전달 → 러너가 gh secret set으로 등록)
-      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 약 3초 대기 (race condition 방지)
-      await new Promise(r => setTimeout(r, 3000));
+      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 약 5초 대기 (race condition 방지)
+      await new Promise(r => setTimeout(r, 5000));
 
       // CF_API_TOKEN은 wrangler.toml 기반 배포에 필요. 계정에 저장된 값 사용.
       // 없으면 빈 문자열 전달 (나중에 수동 등록 안내)
@@ -455,7 +457,12 @@ async function handleApi(request, env, url) {
       }
 
       // 7) WordPress 기본 스키마 초기화
-      await initWpSchema(env.DB, siteId, site.site_name, workerUrl, blogInfo?.url || null);
+      try {
+        await initWpSchema(env.DB, siteId, site.site_name, workerUrl, blogInfo?.url || null);
+      } catch (schemaErr) {
+        // 스키마 초기화 실패는 치명적이지 않음 — 로그만 남기고 계속
+        console.error("WP 스키마 초기화 실패 (무시하고 계속):", schemaErr.message);
+      }
 
       await env.DB.prepare(
         "UPDATE site_jobs SET status = 'success', message = ?, finished_at = strftime('%s','now') WHERE id = ?"
@@ -468,10 +475,10 @@ async function handleApi(request, env, url) {
         bloggerTemplateApplied: templateResult.templateApplied,
         bloggerTemplateNote: templateResult.note,
         bloggerTemplateXml: templateResult.templateApplied ? undefined : templateResult.xml,
-        secretsAutoRegistered: true,
+        secretsAutoRegistered: !!cfApiTokenPlain,
         nextStep: cfApiTokenPlain
           ? "GitHub Actions Secrets가 자동 등록됐습니다. provision 워크플로우가 완료되면 사이트가 활성화됩니다."
-          : "CF_API_TOKEN(Cloudflare API Token)은 자동 등록되지 않았습니다. GitHub 레포 Settings → Secrets → Actions에서 CF_API_TOKEN을 수동으로 등록해주세요.",
+          : "CF_API_TOKEN(Cloudflare API Token)이 등록되지 않아 Secrets 자동 등록이 제한될 수 있습니다. 내 계정에서 CF_API_TOKEN을 등록하거나, GitHub 레포 Settings → Secrets → Actions에서 CF_API_TOKEN을 수동으로 등록해주세요.",
       });
     } catch (e) {
       console.error("Provision error:", e.message, e.stack);
