@@ -401,7 +401,9 @@ async function handleApi(request, env, url) {
         `UPDATE sites SET status = 'active', github_repo = ?, cf_worker_name = ?, cf_worker_url = ?, blogger_blog_url = ?, updated_at = strftime('%s','now') WHERE id = ?`
       ).bind(repoFullName, workerName, workerUrl, blogInfo?.url || null, siteId).run();
 
-      // 4) 워크플로우 파일 로드 및 업로드
+      // 4) 워크플로우 파일 로드 후 Git Tree API로 첫 커밋에 한 번에 포함
+      // → 워크플로우 파일이 처음부터 main 브랜치에 존재하므로
+      //   GitHub가 workflow_dispatch 트리거를 즉시 인식 (422 에러 방지)
       const [provisionYml, syncYml] = await Promise.all([
         env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
           .then(r => { if (!r.ok) throw new Error(`provision.yml 로드 실패: ${r.status}`); return r.text(); }),
@@ -409,12 +411,15 @@ async function handleApi(request, env, url) {
           .then(r => { if (!r.ok) throw new Error(`sync.yml 로드 실패: ${r.status}`); return r.text(); }),
       ]);
 
-      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
-      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
+      // 레포가 비어 있으므로 두 워크플로우 파일 + README를 첫 커밋으로 한 번에 올림
+      await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
+        { path: ".github/workflows/provision.yml", content: provisionYml },
+        { path: ".github/workflows/sync.yml", content: syncYml },
+        { path: "README.md", content: `# wpspot-${site.site_slug}\n\nwpspot 자동 생성 레포지토리입니다.\n` },
+      ], "chore: initial commit with provision & sync workflows");
 
-      // 5) provision 워크플로우 실행 (Secret 값을 inputs로 전달 → 러너가 gh secret set으로 등록)
-      // GitHub가 workflow_dispatch 트리거를 인식하기까지 polling으로 대기
-      // (단순 sleep은 "Workflow does not have 'workflow_dispatch' trigger" 422 에러 발생)
+      // 5) GitHub 내부 인덱싱 대기 후 dispatch
+      // createInitialCommit으로 올렸어도 GitHub Actions 인덱싱에 수 초가 걸릴 수 있음
       await gh.waitForWorkflowReady(githubToken, ghUser.login, repoName, "provision.yml");
 
       // CF_API_TOKEN은 wrangler.toml 기반 배포에 필요. 계정에 저장된 값 사용.
@@ -813,6 +818,5 @@ async function handleApi(request, env, url) {
 
   return err("Not found", 404);
 }
-
 
 
