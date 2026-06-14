@@ -7,8 +7,8 @@ on:
         description: "연동할 Blogspot Blog ID"
         required: false
   schedule:
-    # keep-alive: 5분마다 실행하여 서버리스 워드프레스 인스턴스를 warm 상태로 유지
-    - cron: "*/5 * * * *"
+    # keep-alive: 매 6시간마다 워커에 핑 전송 (GitHub Actions 최소 주기 준수)
+    - cron: "0 */6 * * *"
 
 jobs:
   sync:
@@ -36,7 +36,8 @@ jobs:
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
         run: |
           if [ -n "$CF_WORKER_URL" ]; then
-            curl -sS -o /dev/null -w "%{http_code}\n" "$CF_WORKER_URL" || true
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$CF_WORKER_URL" || echo "000")
+            echo "keep-alive ping → $CF_WORKER_URL : HTTP $STATUS"
           else
             echo "CF_WORKER_URL secret이 설정되지 않아 keep-alive를 건너뜁니다."
           fi

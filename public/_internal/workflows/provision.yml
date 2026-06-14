@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       site_name:
-        description: "wpspot 사이트 이름"
+        description: "wpspot 사이트 slug (URL용)"
         required: true
+      site_display_name:
+        description: "wpspot 사이트 표시 이름"
+        required: false
+        default: ""
 
 jobs:
   provision:
@@ -19,7 +23,13 @@ jobs:
         with:
           php-version: "8.3"
           extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
-          tools: composer, wp-cli
+          tools: composer
+
+      - name: WP-CLI 설치
+        run: |
+          curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+          chmod +x /usr/local/bin/wp
+          wp --info --allow-root
 
       - name: 워드프레스 원본 다운로드
         run: |
@@ -47,22 +57,36 @@ jobs:
           cd wordpress
           if [ ! -f wp-config.php ]; then
             cp wp-config-sample.php wp-config.php
-            sed -i "/\\\$table_prefix/a define('DB_DIR', __DIR__ . '/wp-content/database/');\ndefine('DB_FILE', 'wordpress.db');" wp-config.php
+            # DB_DIR / DB_FILE (SQLite integration)
+            sed -i "s/define( 'DB_NAME'.*/define( 'DB_NAME', 'wordpress' );/" wp-config.php
+            sed -i "s/define( 'DB_USER'.*/define( 'DB_USER', 'root' );/" wp-config.php
+            sed -i "s/define( 'DB_PASSWORD'.*/define( 'DB_PASSWORD', '' );/" wp-config.php
+            sed -i "/define( 'DB_HOST'/a define('DB_DIR', __DIR__ . '/wp-content/database/');\ndefine('DB_FILE', 'wordpress.db');" wp-config.php
             mkdir -p wp-content/database
-            php -r "echo file_get_contents('https://api.wordpress.org/secret-key/1.1/salt/');" >> wp-config.php || true
+            # Salt 주입 (실패해도 계속)
+            SALT=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || echo "")
+            if [ -n "$SALT" ]; then
+              # 기존 placeholder 제거 후 삽입
+              sed -i "/AUTH_KEY/d;/SECURE_AUTH_KEY/d;/LOGGED_IN_KEY/d;/NONCE_KEY/d;/AUTH_SALT/d;/SECURE_AUTH_SALT/d;/LOGGED_IN_SALT/d;/NONCE_SALT/d" wp-config.php
+              echo "$SALT" >> wp-config.php
+            fi
           fi
 
       - name: WordPress 코어 설치 (WP-CLI)
         run: |
           set -e
           cd wordpress
+          DISPLAY_NAME="${{ inputs.site_display_name }}"
+          if [ -z "$DISPLAY_NAME" ]; then
+            DISPLAY_NAME="${{ inputs.site_name }}"
+          fi
           if [ ! -f wp-content/database/wordpress.db ]; then
             wp core install \
-              --url="https://${{ inputs.site_name }}.example" \
-              --title="${{ inputs.site_name }}" \
+              --url="https://${{ inputs.site_name }}.wpspot.app" \
+              --title="$DISPLAY_NAME" \
               --admin_user="admin" \
-              --admin_password="$(openssl rand -base64 12)" \
-              --admin_email="admin@${{ inputs.site_name }}.example" \
+              --admin_password="$(openssl rand -base64 16)" \
+              --admin_email="admin@${{ inputs.site_name }}.wpspot.app" \
               --skip-email \
               --allow-root
           fi
@@ -112,21 +136,23 @@ jobs:
         run: |
           set -e
           mkdir -p dist
-          cp -r wordpress/* dist/
-          # Cloudflare Pages는 PHP를 직접 실행하지 않으므로
-          # wp-transform 워커(서비스 바인딩)가 dist/ 정적 자산을 서빙하고
-          # PHP 요청은 php-runner 워커로 위임한다. 정적 자산만 우선 배포.
+          # wp-content/database는 공개 배포에서 제외
+          rsync -a --exclude='wp-content/database/' wordpress/ dist/
           echo "wpspot static bundle for ${{ inputs.site_name }}" > dist/_wpspot.txt
 
-      - name: Cloudflare Pages 배포
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: wpspot-${{ inputs.site_name }}
-          directory: dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+      - name: Cloudflare Pages 프로젝트 생성 및 배포
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -e
+          npm install -g wrangler
+          # 프로젝트가 없으면 생성
+          wrangler pages project create "wpspot-${{ inputs.site_name }}" --production-branch main 2>/dev/null || true
+          wrangler pages deploy dist \
+            --project-name "wpspot-${{ inputs.site_name }}" \
+            --branch main \
+            --commit-dirty=true
 
       - name: 변경사항 커밋
         run: |
