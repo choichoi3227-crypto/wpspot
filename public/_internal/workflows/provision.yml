@@ -194,10 +194,22 @@ jobs:
       - name: GitHub Actions Secrets 자동 등록
         env:
           GITHUB_TOKEN_FOR_SECRETS: ${{ inputs.secret_github_token }}
+          SECRET_CF_WORKER_URL: ${{ inputs.secret_cf_worker_url }}
+          SECRET_CF_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
+          SECRET_CF_API_TOKEN: ${{ inputs.secret_cf_api_token }}
+          SECRET_GCP_BLOGGER_TOKEN: ${{ inputs.secret_gcp_blogger_token }}
+          SECRET_BLOG_ID: ${{ inputs.secret_blog_id }}
         run: |
           REPO="${{ github.repository }}"
           API="https://api.github.com/repos/${REPO}"
           TOKEN="${GITHUB_TOKEN_FOR_SECRETS}"
+
+          if [ -z "$TOKEN" ]; then
+            echo "⚠ GitHub PAT가 없습니다. secrets 자동 등록을 건너뜁니다."
+            echo "레포 Settings → Secrets → Actions에서 수동으로 등록해주세요:"
+            echo "  CF_WORKER_URL, CF_ACCOUNT_ID, CF_API_TOKEN, GCP_BLOGGER_TOKEN, BLOG_ID"
+            exit 0
+          fi
 
           # Public key 조회
           PK_JSON=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
@@ -205,7 +217,7 @@ jobs:
             "${API}/actions/secrets/public-key" || echo "")
 
           if [ -z "$PK_JSON" ]; then
-            echo "⚠ Public key 조회 실패 — Personal Access Token이 필요합니다."
+            echo "⚠ Public key 조회 실패 — Personal Access Token 권한을 확인해주세요."
             echo "레포 Settings → Secrets → Actions에서 수동으로 등록해주세요:"
             echo "  CF_WORKER_URL, CF_ACCOUNT_ID, CF_API_TOKEN, GCP_BLOGGER_TOKEN, BLOG_ID"
             exit 0
@@ -217,6 +229,20 @@ jobs:
           # libsodium sealed box 암호화 (PyNaCl)
           pip install PyNaCl --quiet 2>/dev/null
 
+          # 암호화 스크립트를 별도 파일로 작성 (heredoc 들여쓰기 문제 방지)
+          cat > /tmp/encrypt_secret.py << 'PYEOF'
+import sys, base64
+from nacl import encoding, public
+
+pub_key_b64 = sys.argv[1]
+secret_value = sys.argv[2]
+
+pub_key = public.PublicKey(pub_key_b64.encode(), encoding.Base64Encoder)
+sealed = public.SealedBox(pub_key)
+encrypted = sealed.encrypt(secret_value.encode())
+print(base64.b64encode(encrypted).decode())
+PYEOF
+
           set_secret() {
             local name="$1"
             local value="$2"
@@ -224,15 +250,11 @@ jobs:
               echo "⚠ 값 없음, 건너뜀: $name"
               return
             fi
-            ENCRYPTED=$(python3 - "$PUB_KEY" "$value" << 'PYEOF'
-          import sys, base64
-          from nacl import encoding, public
-          pub_key = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder)
-          sealed = public.SealedBox(pub_key)
-          encrypted = sealed.encrypt(sys.argv[2].encode())
-          print(base64.b64encode(encrypted).decode())
-          PYEOF
-          )
+            ENCRYPTED=$(python3 /tmp/encrypt_secret.py "$PUB_KEY" "$value")
+            if [ -z "$ENCRYPTED" ]; then
+              echo "✗ 암호화 실패: $name"
+              return
+            fi
             STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
               -X PUT \
               -H "Authorization: Bearer ${TOKEN}" \
@@ -247,8 +269,8 @@ jobs:
             fi
           }
 
-          set_secret "CF_WORKER_URL"     "${{ inputs.secret_cf_worker_url }}"
-          set_secret "CF_ACCOUNT_ID"     "${{ inputs.secret_cf_account_id }}"
-          set_secret "CF_API_TOKEN"      "${{ inputs.secret_cf_api_token }}"
-          set_secret "GCP_BLOGGER_TOKEN" "${{ inputs.secret_gcp_blogger_token }}"
-          set_secret "BLOG_ID"           "${{ inputs.secret_blog_id }}"
+          set_secret "CF_WORKER_URL"     "$SECRET_CF_WORKER_URL"
+          set_secret "CF_ACCOUNT_ID"     "$SECRET_CF_ACCOUNT_ID"
+          set_secret "CF_API_TOKEN"      "$SECRET_CF_API_TOKEN"
+          set_secret "GCP_BLOGGER_TOKEN" "$SECRET_GCP_BLOGGER_TOKEN"
+          set_secret "BLOG_ID"           "$SECRET_BLOG_ID"
