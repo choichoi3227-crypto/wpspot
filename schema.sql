@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   github_token_enc TEXT,           -- GitHub Personal Access Token (repo+workflow 권한)
   gcp_blogger_token_enc TEXT,      -- GCP Blogger API OAuth refresh token
   cf_global_api_key_enc TEXT,      -- Cloudflare Global API Key
+  cf_api_token_enc TEXT,           -- Cloudflare API Token (Pages 배포용, Pages:Edit 권한)
   cf_account_email TEXT,           -- Cloudflare 계정 이메일
   cf_account_id TEXT,              -- Cloudflare Account ID
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -250,3 +251,4 @@ CREATE INDEX IF NOT EXISTS idx_pma_site ON phpmyadmin_tokens(site_id);
 CREATE INDEX IF NOT EXISTS idx_wp_options_site ON wp_options(site_id);
 CREATE INDEX IF NOT EXISTS idx_wp_posts_site ON wp_posts(site_id);
 CREATE INDEX IF NOT EXISTS idx_wp_users_site ON wp_users(site_id);
+
