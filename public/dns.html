@@ -233,14 +233,25 @@
       return m[t] || "type-alias";
     }
 
+    function isReadOnly(r) {
+      // Cloudflare가 read-only로 처리하는 레코드 유형
+      // locked 필드가 true이거나, NS 레코드 중 Cloudflare 자체 네임서버인 경우
+      if (r.meta?.managed_by_apps || r.meta?.managed_by_argo_tunnel) return true;
+      if (r.locked) return true;
+      if (r.type === "NS" && r.zone_name && r.name === r.zone_name) return true; // apex NS
+      return false;
+    }
+
     function renderRecords() {
       const tbody = document.getElementById("dnsBody");
       if (!records.length) {
         tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-tertiary);">DNS 레코드가 없어요.</td></tr>`;
         return;
       }
-      tbody.innerHTML = records.map(r => `
-        <tr>
+      tbody.innerHTML = records.map(r => {
+        const readonly = isReadOnly(r);
+        return `
+        <tr${readonly ? ' style="opacity:0.7;"' : ''}>
           <td><span class="type-badge ${typeClass(r.type)}">${wpspot.escapeHtml(r.type)}</span></td>
           <td title="${wpspot.escapeHtml(r.name)}">${wpspot.escapeHtml(r.name)}</td>
           <td title="${wpspot.escapeHtml(r.content || '')}">${wpspot.escapeHtml(r.content || "")}</td>
@@ -251,13 +262,16 @@
               : '<span style="color:var(--text-tertiary);">—</span>'}
           </td>
           <td>
-            <div style="display:flex;gap:6px;">
-              <button class="btn btn--ghost btn--s" onclick='editRecord(${JSON.stringify(r)})'>수정</button>
-              <button class="btn btn--ghost btn--s" style="color:var(--text-danger);" onclick='deleteRecord(${JSON.stringify(r.id)}, ${JSON.stringify(r.name)})'>삭제</button>
+            <div style="display:flex;gap:6px;align-items:center;">
+              ${readonly
+                ? `<span style="font-size:var(--fs-label-s);color:var(--text-tertiary);padding:4px 8px;">🔒 읽기전용</span>`
+                : `<button class="btn btn--ghost btn--s" onclick='editRecord(${JSON.stringify(r)})'>수정</button>`
+              }
+              <button class="btn btn--ghost btn--s" style="color:var(--text-danger);" onclick='deleteRecord(${JSON.stringify(r.id)}, ${JSON.stringify(r.name)})'${readonly ? ' title="Cloudflare 관리 레코드도 삭제 가능"' : ''}>삭제</button>
             </div>
           </td>
         </tr>
-      `).join("");
+      `}).join("");
     }
 
     function renderRoutes() {
@@ -370,7 +384,11 @@
         wpspot.toast(editingId ? "레코드가 수정됐어요." : "레코드가 추가됐어요.");
         loadAll();
       } catch (e) {
-        errEl.textContent = e.message;
+        let msg = e.message;
+        if (msg.includes("1043") || msg.toLowerCase().includes("read only") || msg.toLowerCase().includes("read-only")) {
+          msg = "이 레코드는 Cloudflare가 읽기 전용으로 관리해요. 삭제 후 새로 추가해주세요.";
+        }
+        errEl.textContent = msg;
         errEl.style.display = "";
       } finally {
         btn.disabled = false; btn.textContent = "저장";
