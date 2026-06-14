@@ -183,5 +183,5 @@ function buildLoadingHtml(origin) {
 </html>\`;
 }`;
 }
-}
+
 
