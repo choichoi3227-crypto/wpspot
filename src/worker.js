@@ -106,8 +106,17 @@ async function handleApi(request, env, url) {
   // ---------- 계정 자격증명 ----------
   if (pathname === "/api/account/credentials" && method === "GET") {
     const row = await env.DB.prepare(
-      "SELECT cf_account_email, cf_account_id, github_token_enc, gcp_blogger_token_enc, cf_global_api_key_enc FROM user_credentials WHERE user_id = ?"
+      `SELECT cf_account_email, cf_account_id, github_token_enc,
+              gcp_blogger_token_enc, cf_global_api_key_enc,
+              gcp_blogger_client_id, gcp_blogger_client_secret_enc,
+              gcp_blogger_refresh_token_enc, gcp_blogger_token_expires_at
+       FROM user_credentials WHERE user_id = ?`
     ).bind(userId).first();
+
+    const now = Math.floor(Date.now() / 1000);
+    const tokenExpired = row?.gcp_blogger_token_expires_at
+      ? now >= row.gcp_blogger_token_expires_at
+      : true;
 
     return json({
       cfAccountEmail: row?.cf_account_email || "",
@@ -115,41 +124,121 @@ async function handleApi(request, env, url) {
       hasGithubToken: !!row?.github_token_enc,
       hasGcpBloggerToken: !!row?.gcp_blogger_token_enc,
       hasCfGlobalApiKey: !!row?.cf_global_api_key_enc,
+      // OAuth 자동 갱신 관련
+      gcpClientId: row?.gcp_blogger_client_id || "",
+      hasGcpClientSecret: !!row?.gcp_blogger_client_secret_enc,
+      hasGcpRefreshToken: !!row?.gcp_blogger_refresh_token_enc,
+      gcpTokenExpired: tokenExpired,
+      gcpTokenExpiresAt: row?.gcp_blogger_token_expires_at || null,
     });
   }
 
   if (pathname === "/api/account/credentials" && method === "PUT") {
     const body = await request.json().catch(() => ({}));
-    const { githubToken, gcpBloggerToken, cfGlobalApiKey, cfAccountEmail, cfAccountId } = body;
+    const {
+      githubToken, gcpBloggerToken, cfGlobalApiKey, cfAccountEmail, cfAccountId,
+      gcpClientId, gcpClientSecret, gcpRefreshToken,
+    } = body;
 
     const githubEnc = githubToken ? await encryptSecret(env, githubToken) : undefined;
     const gcpEnc = gcpBloggerToken ? await encryptSecret(env, gcpBloggerToken) : undefined;
     const cfKeyEnc = cfGlobalApiKey ? await encryptSecret(env, cfGlobalApiKey) : undefined;
+    const gcpSecretEnc = gcpClientSecret ? await encryptSecret(env, gcpClientSecret) : undefined;
+    const gcpRefreshEnc = gcpRefreshToken ? await encryptSecret(env, gcpRefreshToken) : undefined;
 
     const existing = await env.DB.prepare("SELECT user_id FROM user_credentials WHERE user_id = ?").bind(userId).first();
 
     if (existing) {
       const sets = [];
       const binds = [];
-      if (githubEnc !== undefined) { sets.push("github_token_enc = ?"); binds.push(githubEnc); }
-      if (gcpEnc !== undefined) { sets.push("gcp_blogger_token_enc = ?"); binds.push(gcpEnc); }
-      if (cfKeyEnc !== undefined) { sets.push("cf_global_api_key_enc = ?"); binds.push(cfKeyEnc); }
-      if (cfAccountEmail !== undefined) { sets.push("cf_account_email = ?"); binds.push(cfAccountEmail); }
-      if (cfAccountId !== undefined) { sets.push("cf_account_id = ?"); binds.push(cfAccountId); }
+      if (githubEnc !== undefined)     { sets.push("github_token_enc = ?");                   binds.push(githubEnc); }
+      if (gcpEnc !== undefined)        { sets.push("gcp_blogger_token_enc = ?");               binds.push(gcpEnc); }
+      if (cfKeyEnc !== undefined)      { sets.push("cf_global_api_key_enc = ?");               binds.push(cfKeyEnc); }
+      if (cfAccountEmail !== undefined){ sets.push("cf_account_email = ?");                    binds.push(cfAccountEmail); }
+      if (cfAccountId !== undefined)   { sets.push("cf_account_id = ?");                       binds.push(cfAccountId); }
+      if (gcpClientId !== undefined)   { sets.push("gcp_blogger_client_id = ?");               binds.push(gcpClientId); }
+      if (gcpSecretEnc !== undefined)  { sets.push("gcp_blogger_client_secret_enc = ?");       binds.push(gcpSecretEnc); }
+      if (gcpRefreshEnc !== undefined) { sets.push("gcp_blogger_refresh_token_enc = ?");       binds.push(gcpRefreshEnc);
+                                         sets.push("gcp_blogger_token_expires_at = 0"); } // 즉시 갱신 트리거
       sets.push("updated_at = strftime('%s','now')");
-      if (sets.length) {
-        await env.DB.prepare(`UPDATE user_credentials SET ${sets.join(", ")} WHERE user_id = ?`)
-          .bind(...binds, userId).run();
-      }
+      await env.DB.prepare(`UPDATE user_credentials SET ${sets.join(", ")} WHERE user_id = ?`)
+        .bind(...binds, userId).run();
     } else {
       await env.DB.prepare(
         `INSERT INTO user_credentials
-         (user_id, github_token_enc, gcp_blogger_token_enc, cf_global_api_key_enc, cf_account_email, cf_account_id)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).bind(userId, githubEnc || null, gcpEnc || null, cfKeyEnc || null, cfAccountEmail || null, cfAccountId || null).run();
+         (user_id, github_token_enc, gcp_blogger_token_enc, cf_global_api_key_enc,
+          cf_account_email, cf_account_id,
+          gcp_blogger_client_id, gcp_blogger_client_secret_enc, gcp_blogger_refresh_token_enc,
+          gcp_blogger_token_expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+      ).bind(
+        userId,
+        githubEnc || null, gcpEnc || null, cfKeyEnc || null,
+        cfAccountEmail || null, cfAccountId || null,
+        gcpClientId || null, gcpSecretEnc || null, gcpRefreshEnc || null,
+      ).run();
     }
 
     return json({ ok: true });
+  }
+
+  // ---------- Google OAuth 콜백 (Authorization Code → Tokens) ----------
+  if (pathname === "/api/auth/google/callback" && method === "POST") {
+    const body = await request.json().catch(() => ({}));
+    const { code, redirectUri, clientId, clientSecret } = body;
+    if (!code || !redirectUri || !clientId || !clientSecret) {
+      return err("code, redirectUri, clientId, clientSecret가 모두 필요합니다.");
+    }
+    const tokens = await blogger.exchangeCodeForTokens(clientId, clientSecret, code, redirectUri);
+
+    // 토큰 암호화 후 DB 저장
+    const accessEnc = await encryptSecret(env, tokens.accessToken);
+    const refreshEnc = tokens.refreshToken ? await encryptSecret(env, tokens.refreshToken) : null;
+    const secretEnc = await encryptSecret(env, clientSecret);
+
+    const existing = await env.DB.prepare("SELECT user_id FROM user_credentials WHERE user_id = ?").bind(userId).first();
+    if (existing) {
+      const sets = [
+        "gcp_blogger_client_id = ?",
+        "gcp_blogger_client_secret_enc = ?",
+        "gcp_blogger_token_enc = ?",
+        "gcp_blogger_token_expires_at = ?",
+        "updated_at = strftime('%s','now')",
+      ];
+      const binds = [clientId, secretEnc, accessEnc, tokens.expiresAt];
+      if (refreshEnc) {
+        sets.splice(3, 0, "gcp_blogger_refresh_token_enc = ?");
+        binds.splice(3, 0, refreshEnc);
+      }
+      await env.DB.prepare(`UPDATE user_credentials SET ${sets.join(", ")} WHERE user_id = ?`)
+        .bind(...binds, userId).run();
+    } else {
+      await env.DB.prepare(
+        `INSERT INTO user_credentials
+         (user_id, gcp_blogger_client_id, gcp_blogger_client_secret_enc,
+          gcp_blogger_token_enc, gcp_blogger_refresh_token_enc, gcp_blogger_token_expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(userId, clientId, secretEnc, accessEnc, refreshEnc, tokens.expiresAt).run();
+    }
+
+    return json({ ok: true, hasRefreshToken: !!tokens.refreshToken });
+  }
+
+  // ---------- Google OAuth URL 생성 ----------
+  if (pathname === "/api/auth/google/url" && method === "POST") {
+    const body = await request.json().catch(() => ({}));
+    const { clientId, redirectUri } = body;
+    if (!clientId || !redirectUri) return err("clientId와 redirectUri가 필요합니다.");
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/blogger",
+      access_type: "offline",   // refresh_token 발급
+      prompt: "consent",        // 항상 refresh_token 반환 보장
+    });
+    return json({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
   }
 
   // ---------- 사이트 목록 ----------
@@ -246,7 +335,7 @@ async function handleApi(request, env, url) {
 
     try {
       const githubToken = await decryptSecret(env, cred.github_token_enc);
-      const bloggerToken = await decryptSecret(env, cred.gcp_blogger_token_enc);
+      const bloggerToken = await blogger.getValidAccessToken(cred, env, env.DB, userId);
       const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
 
       // 1) GitHub 레포 생성
@@ -700,3 +789,4 @@ async function handleApi(request, env, url) {
 
   return err("Not found", 404);
 }
+
