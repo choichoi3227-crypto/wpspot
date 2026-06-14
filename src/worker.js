@@ -263,21 +263,25 @@ async function handleApi(request, env, url) {
       const workerUrl = `https://${workerName}.${workerSubdomain}.workers.dev`;
 
       // 4) 워크플로우 파일 로드 및 레포에 업로드
-      const [provisionYml, nginxYml] = await Promise.all([
+      const [provisionYml, nginxYml, syncYml] = await Promise.all([
         env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
           .then(r => { if (!r.ok) throw new Error(`provision.yml 로드 실패: ${r.status}`); return r.text(); }),
         env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/nginx-keepalive.yml"))
+          .then(r => r.ok ? r.text() : "").catch(() => ""),
+        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/sync.yml"))
           .then(r => r.ok ? r.text() : "").catch(() => ""),
       ]);
 
       await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
         { path: ".github/workflows/provision.yml", content: provisionYml },
         ...(nginxYml ? [{ path: ".github/workflows/nginx-keepalive.yml", content: nginxYml }] : []),
+        ...(syncYml  ? [{ path: ".github/workflows/sync.yml",            content: syncYml  }] : []),
         { path: ".gitkeep", content: "" },
       ], "chore: initial wpspot setup");
 
-      // 5) provision 워크플로우 실행
-      await new Promise(r => setTimeout(r, 10000));
+      // 5) provision 워크플로우가 GitHub에 인덱싱될 때까지 대기 후 실행
+      await gh.waitForWorkflowReady(githubToken, ghUser.login, repoName, "provision.yml", 30000)
+        .catch(() => { /* 타임아웃 무시 — dispatch 시도는 계속 */ });
 
       const wpAdminUser = generateUsername();
       const wpAdminPass = generatePassword();
@@ -297,13 +301,15 @@ async function handleApi(request, env, url) {
         secret_cf_api_token: cfApiTokenPlain,
         secret_github_token: githubToken,
         secret_worker_name: workerName,
+        secret_site_id: siteId,
       });
 
       // 6) DB 업데이트
+      const pmaWorkerUrl = `https://${workerName}-pma.${workerSubdomain}.workers.dev`;
       await env.DB.prepare(
-        `UPDATE sites SET status = 'active', github_repo = ?, cf_worker_url = ?,
-         cf_worker_name = ?, updated_at = strftime('%s','now') WHERE id = ?`
-      ).bind(repoFullName, workerUrl, workerName, siteId).run();
+        `UPDATE sites SET status = 'provisioning', github_repo = ?, cf_worker_url = ?,
+         cf_worker_name = ?, pma_worker_url = ?, updated_at = strftime('%s','now') WHERE id = ?`
+      ).bind(repoFullName, workerUrl, workerName, pmaWorkerUrl, siteId).run();
 
       const existingCred = await env.DB.prepare("SELECT site_id FROM site_credentials WHERE site_id = ?").bind(siteId).first();
       if (!existingCred) {
@@ -318,6 +324,11 @@ async function handleApi(request, env, url) {
           wpAdminUser, wpAdminPassEnc,
           "wp-content/database/wordpress.db"
         ).run();
+      } else {
+        // 재프로비저닝 시 상태 리셋
+        await env.DB.prepare(
+          "UPDATE site_credentials SET nginx_status = 'provisioning' WHERE site_id = ?"
+        ).bind(siteId).run();
       }
 
       await initWpOptions(env.DB, siteId, site.site_name, `https://${customDomain}`);
@@ -329,6 +340,7 @@ async function handleApi(request, env, url) {
       return json({
         ok: true,
         workerUrl,
+        pmaWorkerUrl,
         githubRepo: repoFullName,
         customDomain,
         pmaDomain: `pma.${customDomain}`,
@@ -423,7 +435,7 @@ async function handleApi(request, env, url) {
     }
 
     const customDomain = site.custom_domain;
-    const plaUrl = customDomain ? `https://pma.${customDomain}` : null;
+    const plaUrl = customDomain ? `https://pma.${customDomain}` : (site.pma_worker_url || null);
     const adminUrl = customDomain ? `https://${customDomain}/wp-admin` : (site.cf_worker_url ? `${site.cf_worker_url}/wp-admin` : null);
 
     return json({
@@ -512,6 +524,47 @@ async function handleApi(request, env, url) {
     if (!allowed.includes(table)) return err("허용되지 않은 테이블입니다.");
     await env.DB.prepare(`DELETE FROM ${table} WHERE ${pk} = ? AND site_id = ?`).bind(pkValue, siteId).run();
     return json({ ok: true });
+  }
+
+  // ── nginx 상태 콜백 (GitHub Actions provision 완료 후 호출) ─────────────
+  // POST /api/sites/:id/nginx-status
+  // Body: { token: "<wpAdminPass>", status: "active"|"error", runnerIp: "1.2.3.4" }
+  const nginxStatusMatch = pathname.match(/^\/api\/sites\/([^/]+)\/nginx-status$/);
+  if (nginxStatusMatch && method === "POST") {
+    const siteId = nginxStatusMatch[1];
+    const body = await request.json().catch(() => ({}));
+    const { status: newStatus, token: callbackToken, runnerIp } = body;
+
+    if (!["active", "error", "provisioning"].includes(newStatus))
+      return err("유효하지 않은 status 값입니다.", 400);
+
+    // 콜백 토큰 검증 (wp_admin_pass 해시 검증)
+    const siteCred = await env.DB.prepare(
+      "SELECT sc.*, s.user_id FROM site_credentials sc JOIN sites s ON s.id = sc.site_id WHERE sc.site_id = ?"
+    ).bind(siteId).first();
+    if (!siteCred) return err("사이트를 찾을 수 없습니다.", 404);
+
+    if (callbackToken && siteCred.wp_admin_password_plain_enc) {
+      const storedPass = await decryptSecret(env, siteCred.wp_admin_password_plain_enc).catch(() => "");
+      if (callbackToken !== storedPass) return err("콜백 토큰이 유효하지 않습니다.", 403);
+    }
+
+    await env.DB.prepare(
+      "UPDATE site_credentials SET nginx_status = ? WHERE site_id = ?"
+    ).bind(newStatus, siteId).run();
+
+    // runnerIp가 있으면 Worker URL도 업데이트 (IP 변경 대응)
+    if (runnerIp && /^\d+\.\d+\.\d+\.\d+$/.test(runnerIp)) {
+      const site = await env.DB.prepare("SELECT cf_worker_name FROM sites WHERE id = ?").bind(siteId).first();
+      if (site?.cf_worker_name) {
+        const newWorkerUrl = `https://${site.cf_worker_name}.workers.dev`;
+        await env.DB.prepare(
+          "UPDATE sites SET status = ?, updated_at = strftime('%s','now') WHERE id = ?"
+        ).bind(newStatus === "active" ? "active" : "error", siteId).run();
+      }
+    }
+
+    return json({ ok: true, status: newStatus });
   }
 
   // ── 파일 관리자 ──────────────────────────────────────────────────────────
