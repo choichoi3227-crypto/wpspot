@@ -1,0 +1,64 @@
+name: wpspot nginx Keep-Alive
+
+on:
+  schedule:
+    # 5분마다 실행 (15개 parallel job × 20초 offset = 항상 활성)
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  keepalive-0:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PHP-FPM + nginx 시작 및 유지
+        run: |
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 php8.3-mbstring 2>/dev/null || true
+          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          # 300초(5분) 동안 유지 (다음 cron 트리거 전까지)
+          echo "Keep-alive 시작: $(date)"
+          sleep 280
+          echo "Keep-alive 종료: $(date)"
+
+  keepalive-1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep-alive offset 20s
+        run: |
+          sleep 20
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          echo "Keep-alive-1: $(date)"
+          sleep 260
+
+  keepalive-2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep-alive offset 40s
+        run: |
+          sleep 40
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          echo "Keep-alive-2: $(date)"
+          sleep 240
+
+  keepalive-3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep-alive offset 60s
+        run: |
+          sleep 60
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          echo "Keep-alive-3: $(date)"
+          sleep 220
+
+  keepalive-4:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep-alive offset 80s
+        run: |
+          sleep 80
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
+          sudo systemctl start nginx php8.3-fpm 2>/dev/null || true
+          echo "Keep-alive-4: $(date)"
+          sleep 200
