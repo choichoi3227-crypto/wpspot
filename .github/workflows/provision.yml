@@ -1,0 +1,254 @@
+name: wpspot Provision
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_name:
+        description: "wpspot 사이트 slug (URL용)"
+        required: true
+      site_display_name:
+        description: "wpspot 사이트 표시 이름"
+        required: false
+        default: ""
+      # Secret 자동 등록용 inputs (HTTPS로만 전달, 러너에서 즉시 마스킹)
+      secret_cf_worker_url:
+        description: "CF_WORKER_URL"
+        required: false
+        default: ""
+      secret_cf_account_id:
+        description: "CF_ACCOUNT_ID"
+        required: false
+        default: ""
+      secret_cf_api_token:
+        description: "CF_API_TOKEN"
+        required: false
+        default: ""
+      secret_gcp_blogger_token:
+        description: "GCP_BLOGGER_TOKEN"
+        required: false
+        default: ""
+      secret_blog_id:
+        description: "BLOG_ID"
+        required: false
+        default: ""
+      secret_github_token:
+        description: "GitHub PAT (secrets 등록용)"
+        required: false
+        default: ""
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      # ── 값 마스킹 (로그 노출 방지) ─────────────────────────────────────────
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.secret_cf_worker_url }}"
+          echo "::add-mask::${{ inputs.secret_cf_account_id }}"
+          echo "::add-mask::${{ inputs.secret_cf_api_token }}"
+          echo "::add-mask::${{ inputs.secret_gcp_blogger_token }}"
+          echo "::add-mask::${{ inputs.secret_blog_id }}"
+          echo "::add-mask::${{ inputs.secret_github_token }}"
+
+      - name: PHP 설치 (8.3)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+          tools: composer
+
+      - name: WP-CLI 설치
+        run: |
+          curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+          chmod +x /usr/local/bin/wp
+          wp --info --allow-root
+
+      - name: 워드프레스 원본 다운로드
+        run: |
+          set -e
+          if [ ! -f wordpress/wp-load.php ]; then
+            curl -sSL https://wordpress.org/latest.tar.gz -o wp.tar.gz
+            tar -xzf wp.tar.gz
+            rm wp.tar.gz
+          fi
+
+      - name: SQLite 통합 플러그인 설치
+        run: |
+          set -e
+          cd wordpress
+          if [ ! -d wp-content/plugins/sqlite-database-integration ]; then
+            curl -sSL https://downloads.wordpress.org/plugin/sqlite-database-integration.latest-stable.zip -o sqlite.zip
+            unzip -q sqlite.zip -d wp-content/plugins/
+            rm sqlite.zip
+          fi
+          cp wp-content/plugins/sqlite-database-integration/db.copy wp-content/db.php
+
+      - name: wp-config.php 생성
+        run: |
+          set -e
+          cd wordpress
+          if [ ! -f wp-config.php ]; then
+            cp wp-config-sample.php wp-config.php
+            sed -i "s/define( 'DB_NAME'.*/define( 'DB_NAME', 'wordpress' );/" wp-config.php
+            sed -i "s/define( 'DB_USER'.*/define( 'DB_USER', 'root' );/" wp-config.php
+            sed -i "s/define( 'DB_PASSWORD'.*/define( 'DB_PASSWORD', '' );/" wp-config.php
+            sed -i "/define( 'DB_HOST'/a define('DB_DIR', __DIR__ . '/wp-content/database/');\ndefine('DB_FILE', 'wordpress.db');" wp-config.php
+            mkdir -p wp-content/database
+            SALT=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || echo "")
+            if [ -n "$SALT" ]; then
+              sed -i "/AUTH_KEY/d;/SECURE_AUTH_KEY/d;/LOGGED_IN_KEY/d;/NONCE_KEY/d;/AUTH_SALT/d;/SECURE_AUTH_SALT/d;/LOGGED_IN_SALT/d;/NONCE_SALT/d" wp-config.php
+              echo "$SALT" >> wp-config.php
+            fi
+          fi
+
+      - name: WordPress 코어 설치 (WP-CLI)
+        run: |
+          set -e
+          cd wordpress
+          DISPLAY_NAME="${{ inputs.site_display_name }}"
+          if [ -z "$DISPLAY_NAME" ]; then
+            DISPLAY_NAME="${{ inputs.site_name }}"
+          fi
+          if [ ! -f wp-content/database/wordpress.db ]; then
+            wp core install \
+              --url="https://${{ inputs.site_name }}.wpspot.app" \
+              --title="$DISPLAY_NAME" \
+              --admin_user="admin" \
+              --admin_password="$(openssl rand -base64 16)" \
+              --admin_email="admin@${{ inputs.site_name }}.wpspot.app" \
+              --skip-email \
+              --allow-root
+          fi
+
+      - name: nginx 설정 생성
+        run: |
+          mkdir -p deploy/nginx
+          cat > deploy/nginx/wpspot.conf << 'EOF'
+          server {
+            listen 80 default_server;
+            server_name _;
+            root /var/www/wordpress;
+            index index.php index.html;
+            gzip on;
+            gzip_types text/css application/javascript application/json text/plain;
+            location / { try_files $uri $uri/ /index.php?$args; }
+            location ~ \.php$ {
+              fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+              fastcgi_index index.php;
+              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              include fastcgi_params;
+            }
+            location ~* \.(css|js|jpg|jpeg|png|gif|svg|woff2?)$ {
+              expires 30d; access_log off;
+            }
+          }
+          EOF
+
+      - name: PHP-FPM OPcache 설정
+        run: |
+          mkdir -p deploy/php
+          cat > deploy/php/opcache.ini << 'EOF'
+          opcache.enable=1
+          opcache.memory_consumption=128
+          opcache.max_accelerated_files=10000
+          opcache.validate_timestamps=0
+          EOF
+
+      - name: 정적 산출물 패키징 (Cloudflare Pages용)
+        run: |
+          set -e
+          mkdir -p dist
+          rsync -a --exclude='wp-content/database/' wordpress/ dist/
+          echo "wpspot static bundle for ${{ inputs.site_name }}" > dist/_wpspot.txt
+
+      - name: Cloudflare Pages 프로젝트 생성 및 배포
+        env:
+          # secrets에 등록된 값 우선, 없으면 inputs 사용 (첫 실행 시)
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN || inputs.secret_cf_api_token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID || inputs.secret_cf_account_id }}
+        run: |
+          set -e
+          npm install -g wrangler
+          wrangler pages project create "wpspot-${{ inputs.site_name }}" --production-branch main 2>/dev/null || true
+          wrangler pages deploy dist \
+            --project-name "wpspot-${{ inputs.site_name }}" \
+            --branch main \
+            --commit-dirty=true
+
+      - name: 변경사항 커밋
+        run: |
+          git config user.name "wpspot-bot"
+          git config user.email "bot@wpspot.app"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: provision wordpress + nginx/php-fpm bundle"
+          git push
+
+      # ── Secrets 등록: GitHub REST API 직접 호출 (libsodium sealed box) ──
+      # GITHUB_TOKEN으로는 같은 레포 secrets 쓰기 불가 → PAT(GitHub Token) 사용
+      - name: GitHub Actions Secrets 자동 등록
+        env:
+          GITHUB_TOKEN_FOR_SECRETS: ${{ inputs.secret_github_token }}
+        run: |
+          REPO="${{ github.repository }}"
+          API="https://api.github.com/repos/${REPO}"
+          TOKEN="${GITHUB_TOKEN_FOR_SECRETS}"
+
+          # Public key 조회
+          PK_JSON=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${API}/actions/secrets/public-key" || echo "")
+
+          if [ -z "$PK_JSON" ]; then
+            echo "⚠ Public key 조회 실패 — Personal Access Token이 필요합니다."
+            echo "레포 Settings → Secrets → Actions에서 수동으로 등록해주세요:"
+            echo "  CF_WORKER_URL, CF_ACCOUNT_ID, CF_API_TOKEN, GCP_BLOGGER_TOKEN, BLOG_ID"
+            exit 0
+          fi
+
+          KEY_ID=$(echo "$PK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['key_id'])")
+          PUB_KEY=$(echo "$PK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
+
+          # libsodium sealed box 암호화 (PyNaCl)
+          pip install PyNaCl --quiet 2>/dev/null
+
+          set_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "⚠ 값 없음, 건너뜀: $name"
+              return
+            fi
+            ENCRYPTED=$(python3 - "$PUB_KEY" "$value" << 'PYEOF'
+          import sys, base64
+          from nacl import encoding, public
+          pub_key = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder)
+          sealed = public.SealedBox(pub_key)
+          encrypted = sealed.encrypt(sys.argv[2].encode())
+          print(base64.b64encode(encrypted).decode())
+          PYEOF
+          )
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              -X PUT \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "${API}/actions/secrets/${name}" \
+              -d "{\"encrypted_value\":\"${ENCRYPTED}\",\"key_id\":\"${KEY_ID}\"}" || echo "000")
+            if [ "$STATUS" = "201" ] || [ "$STATUS" = "204" ]; then
+              echo "✓ Secret 등록: $name"
+            else
+              echo "✗ Secret 등록 실패 ($STATUS): $name"
+            fi
+          }
+
+          set_secret "CF_WORKER_URL"     "${{ inputs.secret_cf_worker_url }}"
+          set_secret "CF_ACCOUNT_ID"     "${{ inputs.secret_cf_account_id }}"
+          set_secret "CF_API_TOKEN"      "${{ inputs.secret_cf_api_token }}"
+          set_secret "GCP_BLOGGER_TOKEN" "${{ inputs.secret_gcp_blogger_token }}"
+          set_secret "BLOG_ID"           "${{ inputs.secret_blog_id }}"
