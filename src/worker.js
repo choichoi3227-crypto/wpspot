@@ -354,9 +354,7 @@ async function handleApi(request, env, url) {
 
     const cred = await env.DB.prepare("SELECT * FROM user_credentials WHERE user_id = ?").bind(userId).first();
     if (!cred?.github_token_enc) return err("내 계정에서 GitHub Token을 먼저 등록해주세요.", 400);
-    if (!cred?.gcp_blogger_token_enc && !cred?.gcp_blogger_refresh_token_enc) {
-      return err("내 계정에서 GCP(Blogger API) Token을 먼저 등록해주세요. Google 계정을 연동하거나 Access Token을 직접 입력해주세요.", 400);
-    }
+    if (!cred?.gcp_blogger_token_enc) return err("내 계정에서 GCP(Blogger API) Token을 먼저 등록해주세요.", 400);
     if (!cred?.cf_global_api_key_enc || !cred?.cf_account_email) {
       return err("내 계정에서 Cloudflare Global API Key와 계정 이메일을 먼저 등록해주세요.", 400);
     }
@@ -401,9 +399,7 @@ async function handleApi(request, env, url) {
         `UPDATE sites SET status = 'active', github_repo = ?, cf_worker_name = ?, cf_worker_url = ?, blogger_blog_url = ?, updated_at = strftime('%s','now') WHERE id = ?`
       ).bind(repoFullName, workerName, workerUrl, blogInfo?.url || null, siteId).run();
 
-      // 4) 워크플로우 파일 로드 후 Git Tree API로 첫 커밋에 한 번에 포함
-      // → 워크플로우 파일이 처음부터 main 브랜치에 존재하므로
-      //   GitHub가 workflow_dispatch 트리거를 즉시 인식 (422 에러 방지)
+      // 4) 워크플로우 파일 로드 및 업로드
       const [provisionYml, syncYml] = await Promise.all([
         env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
           .then(r => { if (!r.ok) throw new Error(`provision.yml 로드 실패: ${r.status}`); return r.text(); }),
@@ -411,35 +407,31 @@ async function handleApi(request, env, url) {
           .then(r => { if (!r.ok) throw new Error(`sync.yml 로드 실패: ${r.status}`); return r.text(); }),
       ]);
 
-      // 레포가 비어 있으므로 두 워크플로우 파일 + README를 첫 커밋으로 한 번에 올림
-      await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
-        { path: ".github/workflows/provision.yml", content: provisionYml },
-        { path: ".github/workflows/sync.yml", content: syncYml },
-        { path: "README.md", content: `# wpspot-${site.site_slug}\n\nwpspot 자동 생성 레포지토리입니다.\n` },
-      ], "chore: initial commit with provision & sync workflows");
+      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/provision.yml", provisionYml, "chore: add provision workflow");
+      await gh.putFile(githubToken, ghUser.login, repoName, ".github/workflows/sync.yml", syncYml, "chore: add sync workflow");
 
-      // 5) dispatch에 필요한 정보를 DB에 저장
-      // → provision Worker 요청에서 직접 dispatch하면 GitHub Actions 인덱싱 딜레이(불규칙)로 422 발생
-      // → 프론트가 /provision-dispatch를 10초 후 별도로 호출해 dispatch
+      // 5) provision 워크플로우 실행 (Secret 값을 inputs로 전달 → 러너가 gh secret set으로 등록)
+      // GitHub가 방금 푸시된 워크플로우 파일을 인식하기까지 10초 대기 (race condition 방지)
+      // 3초는 부족할 수 있음 — GitHub Actions가 workflow_dispatch를 인식하는데 최대 10초 소요
+      await new Promise(r => setTimeout(r, 10000));
+
+      // CF_API_TOKEN은 wrangler.toml 기반 배포에 필요. 계정에 저장된 값 사용.
+      // 없으면 빈 문자열 전달 (나중에 수동 등록 안내)
       const cfApiTokenPlain = cred.cf_api_token_enc
         ? await decryptSecret(env, cred.cf_api_token_enc).catch(() => "")
         : "";
 
-      // dispatch inputs를 JSON으로 site_jobs 메시지에 임시 저장
-      const dispatchInputs = {
+      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
         site_name: site.site_slug,
         site_display_name: site.site_name,
+        // Secret 자동 등록용 inputs (HTTPS 전송, 러너에서 즉시 ::add-mask:: 처리)
         secret_cf_worker_url: workerUrl,
         secret_cf_account_id: accountId,
         secret_cf_api_token: cfApiTokenPlain,
         secret_gcp_blogger_token: bloggerToken,
         secret_blog_id: site.blogger_blog_id || "",
-        secret_github_token: githubToken,
-      };
-
-      await env.DB.prepare(
-        "UPDATE site_jobs SET status = 'pending_dispatch', message = ? WHERE id = ?"
-      ).bind(JSON.stringify(dispatchInputs), jobId).run();
+        secret_github_token: githubToken,  // PAT — secrets 등록에 필요
+      });
 
       // 6) 호스팅 접속 정보 생성
       const existingCred = await env.DB.prepare("SELECT site_id FROM site_credentials WHERE site_id = ?").bind(siteId).first();
@@ -464,12 +456,7 @@ async function handleApi(request, env, url) {
       }
 
       // 7) WordPress 기본 스키마 초기화
-      try {
-        await initWpSchema(env.DB, siteId, site.site_name, workerUrl, blogInfo?.url || null);
-      } catch (schemaErr) {
-        // 스키마 초기화 실패는 치명적이지 않음 — 로그만 남기고 계속
-        console.error("WP 스키마 초기화 실패 (무시하고 계속):", schemaErr.message);
-      }
+      await initWpSchema(env.DB, siteId, site.site_name, workerUrl, blogInfo?.url || null);
 
       await env.DB.prepare(
         "UPDATE site_jobs SET status = 'success', message = ?, finished_at = strftime('%s','now') WHERE id = ?"
@@ -482,10 +469,10 @@ async function handleApi(request, env, url) {
         bloggerTemplateApplied: templateResult.templateApplied,
         bloggerTemplateNote: templateResult.note,
         bloggerTemplateXml: templateResult.templateApplied ? undefined : templateResult.xml,
-        secretsAutoRegistered: !!cfApiTokenPlain,
-        needsDispatch: true,  // 프론트가 10초 후 /provision-dispatch를 호출해야 함
-        jobId,
-        nextStep: "레포지토리 생성 완료. GitHub Actions 워크플로우를 곧 실행합니다...",
+        secretsAutoRegistered: true,
+        nextStep: cfApiTokenPlain
+          ? "GitHub Actions Secrets가 자동 등록됐습니다. provision 워크플로우가 완료되면 사이트가 활성화됩니다."
+          : "CF_API_TOKEN(Cloudflare API Token)은 자동 등록되지 않았습니다. GitHub 레포 Settings → Secrets → Actions에서 CF_API_TOKEN을 수동으로 등록해주세요.",
       });
     } catch (e) {
       console.error("Provision error:", e.message, e.stack);
@@ -496,67 +483,6 @@ async function handleApi(request, env, url) {
       ).bind(String(e.message).slice(0, 500), jobId).run();
       return err(`프로비저닝 실패: ${e.message}`, 500);
     }
-  }
-
-  // ---------- provision-dispatch: GitHub Actions 워크플로우 실행 (provision과 분리) ----------
-  // provision 완료 후 프론트가 10~15초 후 이 엔드포인트를 호출해 dispatch
-  // GitHub Actions 인덱싱 딜레이로 인한 422 "Workflow does not have 'workflow_dispatch' trigger" 방지
-  const dispatchMatch = pathname.match(/^\/api\/sites\/([^/]+)\/provision-dispatch$/);
-  if (dispatchMatch && method === "POST") {
-    const siteId = dispatchMatch[1];
-    const site = await env.DB.prepare("SELECT * FROM sites WHERE id = ? AND user_id = ?").bind(siteId, userId).first();
-    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
-    if (!site.github_repo) return err("아직 프로비저닝되지 않은 사이트입니다.", 400);
-
-    // DB에 저장된 dispatch inputs 조회
-    const job = await env.DB.prepare(
-      "SELECT * FROM site_jobs WHERE site_id = ? AND job_type = 'provision' AND status = 'pending_dispatch' ORDER BY created_at DESC LIMIT 1"
-    ).bind(siteId).first();
-    if (!job) return err("dispatch 대기 중인 작업이 없습니다. 이미 실행됐거나 provision을 먼저 해주세요.", 404);
-
-    const inputs = JSON.parse(job.message);
-    const [owner, repo] = site.github_repo.split("/");
-
-    // workflow_dispatch 트리거 인식 여부 확인 (최대 3회 재시도)
-    let dispatched = false;
-    let lastErr = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await gh.dispatchWorkflow(inputs.secret_github_token, owner, repo, "provision.yml", "main", {
-          site_name: inputs.site_name,
-          site_display_name: inputs.site_display_name,
-          secret_cf_worker_url: inputs.secret_cf_worker_url,
-          secret_cf_account_id: inputs.secret_cf_account_id,
-          secret_cf_api_token: inputs.secret_cf_api_token,
-          secret_gcp_blogger_token: inputs.secret_gcp_blogger_token,
-          secret_blog_id: inputs.secret_blog_id,
-          secret_github_token: inputs.secret_github_token,
-        });
-        dispatched = true;
-        break;
-      } catch (e) {
-        lastErr = e;
-        if (attempt < 3) {
-          // 422이면 아직 인덱싱 중 — 5초 대기 후 재시도
-          await new Promise(r => setTimeout(r, 5000));
-        }
-      }
-    }
-
-    if (!dispatched) {
-      return err(`워크플로우 실행 실패 (3회 시도): ${lastErr?.message}`, 500);
-    }
-
-    await env.DB.prepare(
-      "UPDATE site_jobs SET status = 'success', message = '프로비저닝 완료 (워크플로우 실행됨)', finished_at = strftime('%s','now') WHERE id = ?"
-    ).bind(job.id).run();
-
-    return json({
-      ok: true,
-      nextStep: inputs.secret_cf_api_token
-        ? "GitHub Actions Secrets가 자동 등록됐습니다. provision 워크플로우가 완료되면 사이트가 활성화됩니다."
-        : "CF_API_TOKEN이 없습니다. GitHub 레포 Settings → Secrets → Actions에서 CF_API_TOKEN을 수동으로 등록해주세요.",
-    });
   }
 
   // ---------- 사이트 동기화 ----------
