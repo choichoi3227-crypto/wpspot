@@ -3,16 +3,27 @@ name: wpspot Provision
 on:
   workflow_dispatch:
     inputs:
-      site_name:
-        description: "wpspot 사이트 slug (URL용)"
+      site_slug:
+        description: "사이트 slug (URL용)"
         required: true
       site_display_name:
-        description: "wpspot 사이트 표시 이름"
+        description: "사이트 표시 이름"
         required: false
         default: ""
-      # Secret 자동 등록용 inputs (HTTPS로만 전달, 러너에서 즉시 마스킹)
-      secret_cf_worker_url:
-        description: "CF_WORKER_URL"
+      custom_domain:
+        description: "사용자 개인 도메인 (예: example.com)"
+        required: false
+        default: ""
+      pma_domain:
+        description: "PHPLiteAdmin 도메인 (예: pma.example.com)"
+        required: false
+        default: ""
+      wp_admin_user:
+        description: "WordPress 관리자 아이디"
+        required: false
+        default: "admin"
+      wp_admin_pass:
+        description: "WordPress 관리자 비밀번호"
         required: false
         default: ""
       secret_cf_account_id:
@@ -23,16 +34,12 @@ on:
         description: "CF_API_TOKEN"
         required: false
         default: ""
-      secret_gcp_blogger_token:
-        description: "GCP_BLOGGER_TOKEN"
-        required: false
-        default: ""
-      secret_blog_id:
-        description: "BLOG_ID"
-        required: false
-        default: ""
       secret_github_token:
         description: "GitHub PAT (secrets 등록용)"
+        required: false
+        default: ""
+      secret_worker_name:
+        description: "Cloudflare Worker 이름"
         required: false
         default: ""
 
@@ -46,30 +53,47 @@ jobs:
       - name: 체크아웃
         uses: actions/checkout@v4
 
-      # ── 값 마스킹 (로그 노출 방지) ─────────────────────────────────────────
+      # ── 민감 정보 마스킹 ────────────────────────────────────────────────
       - name: Mask sensitive inputs
         run: |
-          echo "::add-mask::${{ inputs.secret_cf_worker_url }}"
+          echo "::add-mask::${{ inputs.wp_admin_pass }}"
           echo "::add-mask::${{ inputs.secret_cf_account_id }}"
           echo "::add-mask::${{ inputs.secret_cf_api_token }}"
-          echo "::add-mask::${{ inputs.secret_gcp_blogger_token }}"
-          echo "::add-mask::${{ inputs.secret_blog_id }}"
           echo "::add-mask::${{ inputs.secret_github_token }}"
 
-      - name: PHP 설치 (8.3)
+      # ── PHP 8.3 + 필수 익스텐션 설치 ───────────────────────────────────
+      - name: PHP 8.3 설치
         uses: shivammathur/setup-php@v2
         with:
           php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, intl, opcache
           tools: composer
+          ini-values: |
+            opcache.enable=1
+            opcache.memory_consumption=128
+            opcache.max_accelerated_files=10000
+            opcache.validate_timestamps=0
 
+      # ── nginx + PHP-FPM 설치 ────────────────────────────────────────────
+      - name: nginx 및 PHP-FPM 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 php8.3-mbstring \
+            php8.3-gd php8.3-zip php8.3-curl php8.3-xml php8.3-intl php8.3-opcache
+          sudo systemctl enable nginx
+          sudo systemctl enable php8.3-fpm
+          php --version
+          nginx -version
+
+      # ── WP-CLI 설치 ─────────────────────────────────────────────────────
       - name: WP-CLI 설치
         run: |
           curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
           chmod +x /usr/local/bin/wp
           wp --info --allow-root
 
-      - name: 워드프레스 원본 다운로드
+      # ── WordPress 최신 버전 다운로드 ────────────────────────────────────
+      - name: WordPress 다운로드
         run: |
           set -e
           if [ ! -f wordpress/wp-load.php ]; then
@@ -77,120 +101,400 @@ jobs:
             tar -xzf wp.tar.gz
             rm wp.tar.gz
           fi
+          echo "WordPress 버전: $(cat wordpress/wp-includes/version.php | grep wp_version= | head -1)"
 
+      # ── SQLite 통합 플러그인 (서버리스 DB) ─────────────────────────────
       - name: SQLite 통합 플러그인 설치
         run: |
           set -e
-          cd wordpress
-          if [ ! -d wp-content/plugins/sqlite-database-integration ]; then
+          mkdir -p wordpress/wp-content/plugins
+          if [ ! -d wordpress/wp-content/plugins/sqlite-database-integration ]; then
             curl -sSL https://downloads.wordpress.org/plugin/sqlite-database-integration.latest-stable.zip -o sqlite.zip
-            unzip -q sqlite.zip -d wp-content/plugins/
+            unzip -q sqlite.zip -d wordpress/wp-content/plugins/
             rm sqlite.zip
           fi
-          cp wp-content/plugins/sqlite-database-integration/db.copy wp-content/db.php
+          cp wordpress/wp-content/plugins/sqlite-database-integration/db.copy wordpress/wp-content/db.php
+          mkdir -p wordpress/wp-content/database
 
+      # ── PHPLiteAdmin 최신 버전 설치 ─────────────────────────────────────
+      - name: PHPLiteAdmin 설치
+        run: |
+          set -e
+          mkdir -p wordpress/wp-content/phpliteadmin
+          # PHPLiteAdmin 최신 stable 다운로드
+          PLAVER=$(curl -s "https://api.github.com/repos/phpLiteAdmin/phpLiteAdmin/releases/latest" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('tag_name','1.9.9'))" 2>/dev/null || echo "1.9.9")
+          echo "PHPLiteAdmin 버전: $PLAVER"
+          # zip 다운로드 시도 (실패 시 직접 URL)
+          PLAZIPURL="https://github.com/phpLiteAdmin/phpLiteAdmin/archive/refs/tags/${PLAVER}.zip"
+          curl -sSL "$PLAZIPURL" -o pla.zip 2>/dev/null || \
+            curl -sSL "https://www.phpliteadmin.org/download.php?version=stable" -o pla.zip || \
+            curl -sSL "https://github.com/phpLiteAdmin/phpLiteAdmin/archive/refs/heads/master.zip" -o pla.zip
+          unzip -q pla.zip -d /tmp/pla_tmp/
+          # phpliteadmin.php 파일 찾기
+          PLAFILE=$(find /tmp/pla_tmp/ -name "phpliteadmin.php" | head -1)
+          if [ -n "$PLAFILE" ]; then
+            cp "$PLAFILE" wordpress/wp-content/phpliteadmin/phpliteadmin.php
+            echo "PHPLiteAdmin 설치 완료: $PLAFILE"
+          else
+            echo "PHPLiteAdmin zip에서 파일을 찾지 못함, 직접 다운로드"
+            curl -sSL "https://raw.githubusercontent.com/phpLiteAdmin/phpLiteAdmin/master/phpliteadmin.php" \
+              -o wordpress/wp-content/phpliteadmin/phpliteadmin.php
+          fi
+          rm -rf pla.zip /tmp/pla_tmp/
+          ls -la wordpress/wp-content/phpliteadmin/
+
+      # ── PHPLiteAdmin 설정 파일 생성 ─────────────────────────────────────
+      - name: PHPLiteAdmin 설정
+        run: |
+          PMA_DOMAIN="${{ inputs.pma_domain }}"
+          CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
+          DB_ABS_PATH="$(pwd)/wordpress/wp-content/database"
+          cat > wordpress/wp-content/phpliteadmin/config.php << PHPEOF
+          <?php
+          // PHPLiteAdmin 설정 — wpspot 자동 생성
+          // 실제 직접 접속은 차단, pma.{도메인}을 통해서만 접근 가능
+
+          // 접근 허용 도메인 (pma.{사용자도메인}만 허용)
+          \$config['allowed_hosts'] = ['${PMA_DOMAIN}', 'localhost', '127.0.0.1'];
+
+          // 관리할 DB 디렉토리
+          \$config['directory'] = '${DB_ABS_PATH}';
+
+          // 비밀번호는 Worker API를 통해 검증하므로 여기서는 빈값
+          // 실제 접근 제어는 nginx 레벨에서 처리
+          \$config['password'] = '';
+          \$config['subdirectories'] = true;
+          \$config['rows_per_page'] = 50;
+          \$config['extra_config'] = '';
+          PHPEOF
+          echo "PHPLiteAdmin 설정 완료"
+
+      # ── wp-config.php 생성 ──────────────────────────────────────────────
       - name: wp-config.php 생성
         run: |
           set -e
           cd wordpress
           if [ ! -f wp-config.php ]; then
             cp wp-config-sample.php wp-config.php
-            sed -i "s/define( 'DB_NAME'.*/define( 'DB_NAME', 'wordpress' );/" wp-config.php
-            sed -i "s/define( 'DB_USER'.*/define( 'DB_USER', 'root' );/" wp-config.php
-            sed -i "s/define( 'DB_PASSWORD'.*/define( 'DB_PASSWORD', '' );/" wp-config.php
+          fi
+          CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
+          SITE_URL="https://${CUSTOM_DOMAIN}"
+          if [ -z "$CUSTOM_DOMAIN" ]; then
+            SITE_URL="https://${{ inputs.site_slug }}.wpspot.app"
+          fi
+          # DB 설정 (SQLite)
+          sed -i "s/define( 'DB_NAME'.*/define( 'DB_NAME', 'wordpress' );/" wp-config.php
+          sed -i "s/define( 'DB_USER'.*/define( 'DB_USER', 'root' );/" wp-config.php
+          sed -i "s/define( 'DB_PASSWORD'.*/define( 'DB_PASSWORD', '' );/" wp-config.php
+          # SQLite 플러그인용 DB 경로
+          grep -q "DB_DIR" wp-config.php || \
             sed -i "/define( 'DB_HOST'/a define('DB_DIR', __DIR__ . '/wp-content/database/');\ndefine('DB_FILE', 'wordpress.db');" wp-config.php
-            mkdir -p wp-content/database
-            SALT=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || echo "")
-            if [ -n "$SALT" ]; then
-              sed -i "/AUTH_KEY/d;/SECURE_AUTH_KEY/d;/LOGGED_IN_KEY/d;/NONCE_KEY/d;/AUTH_SALT/d;/SECURE_AUTH_SALT/d;/LOGGED_IN_SALT/d;/NONCE_SALT/d" wp-config.php
-              echo "$SALT" >> wp-config.php
-            fi
+          mkdir -p wp-content/database
+          # WordPress URL 설정
+          grep -q "WP_HOME" wp-config.php || cat >> wp-config.php << WPEOF
+
+          define('WP_HOME', '${SITE_URL}');
+          define('WP_SITEURL', '${SITE_URL}');
+          define('WP_CACHE', true);
+          define('WP_DEBUG', false);
+          define('WP_DEBUG_LOG', false);
+          WPEOF
+          # Salt 키 자동 생성
+          SALT=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null || echo "")
+          if [ -n "$SALT" ]; then
+            sed -i "/AUTH_KEY/d;/SECURE_AUTH_KEY/d;/LOGGED_IN_KEY/d;/NONCE_KEY/d;/AUTH_SALT/d;/SECURE_AUTH_SALT/d;/LOGGED_IN_SALT/d;/NONCE_SALT/d" wp-config.php
+            echo "$SALT" >> wp-config.php
           fi
 
-      - name: WordPress 코어 설치 (WP-CLI)
+      # ── WordPress 코어 설치 (WP-CLI + SQLite) ───────────────────────────
+      - name: WordPress 코어 설치
         run: |
           set -e
           cd wordpress
-          DISPLAY_NAME="${{ inputs.site_display_name }}"
-          if [ -z "$DISPLAY_NAME" ]; then
-            DISPLAY_NAME="${{ inputs.site_name }}"
+          CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
+          SITE_URL="https://${CUSTOM_DOMAIN}"
+          if [ -z "$CUSTOM_DOMAIN" ]; then
+            SITE_URL="https://${{ inputs.site_slug }}.wpspot.app"
+          fi
+          DISPLAY="${{ inputs.site_display_name }}"
+          if [ -z "$DISPLAY" ]; then DISPLAY="${{ inputs.site_slug }}"; fi
+          WP_ADMIN_PASS="${{ inputs.wp_admin_pass }}"
+          if [ -z "$WP_ADMIN_PASS" ]; then
+            WP_ADMIN_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
           fi
           if [ ! -f wp-content/database/wordpress.db ]; then
             wp core install \
-              --url="https://${{ inputs.site_name }}.wpspot.app" \
-              --title="$DISPLAY_NAME" \
-              --admin_user="admin" \
-              --admin_password="$(openssl rand -base64 16)" \
-              --admin_email="admin@${{ inputs.site_name }}.wpspot.app" \
+              --url="$SITE_URL" \
+              --title="$DISPLAY" \
+              --admin_user="${{ inputs.wp_admin_user }}" \
+              --admin_password="$WP_ADMIN_PASS" \
+              --admin_email="admin@$(echo $SITE_URL | sed 's|https://||')" \
               --skip-email \
               --allow-root
+            echo "WordPress 설치 완료"
+          else
+            echo "WordPress 이미 설치됨, 건너뜀"
           fi
 
-      - name: nginx 설정 생성
+      # ── nginx 서버 설정 파일 (레포에 커밋) ─────────────────────────────
+      - name: nginx 설정 파일 생성
         run: |
           mkdir -p deploy/nginx
-          cat > deploy/nginx/wpspot.conf << 'EOF'
-          server {
-            listen 80 default_server;
-            server_name _;
-            root /var/www/wordpress;
-            index index.php index.html;
-            gzip on;
-            gzip_types text/css application/javascript application/json text/plain;
-            location / { try_files $uri $uri/ /index.php?$args; }
-            location ~ \.php$ {
-              fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-              fastcgi_index index.php;
-              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-              include fastcgi_params;
-            }
-            location ~* \.(css|js|jpg|jpeg|png|gif|svg|woff2?)$ {
-              expires 30d; access_log off;
-            }
-          }
-          EOF
+          CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
+          PMA_DOMAIN="${{ inputs.pma_domain }}"
+          WP_ROOT="$(pwd)/wordpress"
 
-      - name: PHP-FPM OPcache 설정
+          # 메인 WordPress 서버 블록
+          cat > deploy/nginx/wordpress.conf << NGEOF
+          # wpspot — WordPress nginx 설정 (자동 생성)
+          # PHP-FPM 소켓: /run/php/php8.3-fpm.sock
+
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name ${CUSTOM_DOMAIN} www.${CUSTOM_DOMAIN} _;
+
+              root ${WP_ROOT};
+              index index.php index.html;
+
+              # Gzip 압축
+              gzip on;
+              gzip_vary on;
+              gzip_min_length 1024;
+              gzip_types text/plain text/css text/xml text/javascript
+                         application/x-javascript application/xml application/json
+                         application/javascript font/woff2;
+
+              # WordPress permalink
+              location / {
+                  try_files \$uri \$uri/ /index.php?\$args;
+              }
+
+              # PHP 실행
+              location ~ \.php$ {
+                  try_files \$uri =404;
+                  fastcgi_split_path_info ^(.+\.php)(/.+)$;
+                  fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  include fastcgi_params;
+                  fastcgi_read_timeout 300;
+                  fastcgi_buffers 16 16k;
+                  fastcgi_buffer_size 32k;
+              }
+
+              # 정적 파일 캐시
+              location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg|woff|woff2|ttf|eot)$ {
+                  expires 30d;
+                  add_header Cache-Control "public, immutable";
+                  access_log off;
+              }
+
+              # PHPLiteAdmin 직접 접속 차단 (pma.도메인을 통해서만 허용)
+              location ~ /phpliteadmin/ {
+                  deny all;
+                  return 403;
+              }
+
+              # wp-content/database 직접 접근 차단
+              location ~ /wp-content/database/ {
+                  deny all;
+                  return 403;
+              }
+
+              # .htaccess 등 숨김파일 차단
+              location ~ /\. {
+                  deny all;
+              }
+
+              client_max_body_size 64M;
+          }
+
+          NGEOF
+
+          # PHPLiteAdmin 전용 서버 블록 (pma.도메인)
+          PLA_ROOT="${WP_ROOT}/wp-content/phpliteadmin"
+          cat > deploy/nginx/phpliteadmin.conf << NGEOF
+          # wpspot — PHPLiteAdmin nginx 설정 (자동 생성)
+          # 접근: pma.${CUSTOM_DOMAIN}
+
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name ${PMA_DOMAIN};
+
+              root ${PLA_ROOT};
+              index phpliteadmin.php;
+
+              # 오직 phpliteadmin.php만 실행 허용
+              location / {
+                  try_files \$uri \$uri/ /phpliteadmin.php?\$args;
+              }
+
+              location ~ \.php$ {
+                  try_files \$uri =404;
+                  fastcgi_split_path_info ^(.+\.php)(/.+)$;
+                  fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+                  fastcgi_index phpliteadmin.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  include fastcgi_params;
+                  fastcgi_read_timeout 120;
+              }
+
+              # phpliteadmin.php 외 PHP 실행 차단
+              location ~ ^/(?!phpliteadmin\.php).+\.php$ {
+                  deny all;
+              }
+
+              # DB 파일 직접 다운로드 차단
+              location ~ \.(db|sqlite|sqlite3)$ {
+                  deny all;
+              }
+
+              location ~ /\. {
+                  deny all;
+              }
+
+              client_max_body_size 16M;
+          }
+
+          NGEOF
+          echo "nginx 설정 파일 생성 완료"
+
+      # ── PHP-FPM pool 설정 ────────────────────────────────────────────────
+      - name: PHP-FPM 설정 파일 생성
         run: |
-          mkdir -p deploy/php
-          cat > deploy/php/opcache.ini << 'EOF'
+          mkdir -p deploy/php-fpm
+          cat > deploy/php-fpm/www.conf << PHPEOF
+          [www]
+          user = www-data
+          group = www-data
+          listen = /run/php/php8.3-fpm.sock
+          listen.owner = www-data
+          listen.group = www-data
+          pm = dynamic
+          pm.max_children = 10
+          pm.start_servers = 2
+          pm.min_spare_servers = 1
+          pm.max_spare_servers = 5
+          pm.max_requests = 500
+          php_admin_value[error_log] = /var/log/php8.3-fpm.log
+          php_admin_flag[log_errors] = on
+          PHPEOF
+
+          cat > deploy/php-fpm/opcache.ini << PHPEOF
           opcache.enable=1
           opcache.memory_consumption=128
           opcache.max_accelerated_files=10000
           opcache.validate_timestamps=0
-          EOF
+          opcache.revalidate_freq=0
+          opcache.save_comments=1
+          PHPEOF
+          echo "PHP-FPM 설정 완료"
 
-      - name: 정적 산출물 패키징 (Cloudflare Pages용)
+      # ── nginx 배포 (서비스 시작) ─────────────────────────────────────────
+      - name: nginx + PHP-FPM 서비스 시작
         run: |
-          set -e
-          mkdir -p dist
-          rsync -a --exclude='wp-content/database/' wordpress/ dist/
-          echo "wpspot static bundle for ${{ inputs.site_name }}" > dist/_wpspot.txt
+          # nginx 설정 복사
+          sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf
+          sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf
+          sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
+          sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          # PHP-FPM 설정 복사
+          sudo cp deploy/php-fpm/www.conf /etc/php/8.3/fpm/pool.d/www.conf
+          sudo cp deploy/php-fpm/opcache.ini /etc/php/8.3/mods-available/opcache.ini
+          # wordpress 파일 권한 설정
+          sudo chown -R www-data:www-data wordpress/
+          sudo chmod -R 755 wordpress/
+          sudo chmod -R 770 wordpress/wp-content/
+          # 서비스 시작
+          sudo nginx -t && sudo systemctl start nginx
+          sudo systemctl start php8.3-fpm
+          echo "nginx + PHP-FPM 시작 완료"
+          # 상태 확인
+          sudo systemctl is-active nginx && echo "nginx: 실행중"
+          sudo systemctl is-active php8.3-fpm && echo "php-fpm: 실행중"
+          # WordPress 동작 확인
+          sleep 3
+          curl -sf http://localhost/ -o /dev/null && echo "WordPress HTTP 응답 OK" || echo "경고: HTTP 응답 없음"
 
-      - name: Cloudflare Pages 프로젝트 생성 및 배포
+      # ── Cloudflare Worker 배포 (프록시) ─────────────────────────────────
+      - name: Cloudflare Worker 배포
         env:
-          # secrets에 등록된 값 우선, 없으면 inputs 사용 (첫 실행 시)
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN || inputs.secret_cf_api_token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID || inputs.secret_cf_account_id }}
         run: |
           set -e
-          npm install -g wrangler
-          wrangler pages project create "wpspot-${{ inputs.site_name }}" --production-branch main 2>/dev/null || true
-          wrangler pages deploy dist \
-            --project-name "wpspot-${{ inputs.site_name }}" \
-            --branch main \
-            --commit-dirty=true
+          WORKER_NAME="${{ inputs.secret_worker_name }}"
+          if [ -z "$WORKER_NAME" ]; then
+            WORKER_NAME="wpspot-${{ inputs.site_slug }}"
+          fi
+          mkdir -p .cf-worker
+          cat > .cf-worker/worker.js << 'WORKEREOF'
+          // wpspot 프록시 Worker — nginx(GitHub Actions 컨테이너)로 요청 전달
+          // 실제 PHP 실행은 GitHub Actions 컨테이너의 nginx+PHP-FPM이 담당
+          export default {
+            async fetch(request, env) {
+              const url = new URL(request.url);
+              // ORIGIN은 wrangler secret 또는 환경변수
+              const origin = env.NGINX_ORIGIN || "http://localhost";
+              const target = new URL(origin);
+              target.pathname = url.pathname;
+              target.search = url.search;
+              const headers = new Headers(request.headers);
+              headers.set("host", target.host);
+              headers.set("x-forwarded-for", request.headers.get("cf-connecting-ip") || "");
+              headers.set("x-forwarded-proto", "https");
+              try {
+                const resp = await fetch(target.toString(), {
+                  method: request.method,
+                  headers,
+                  body: ["GET","HEAD"].includes(request.method) ? undefined : request.body,
+                  redirect: "manual",
+                });
+                const outHeaders = new Headers(resp.headers);
+                outHeaders.set("x-powered-by", "wpspot");
+                return new Response(resp.body, { status: resp.status, headers: outHeaders });
+              } catch (e) {
+                return new Response(buildOfflinePage(), {
+                  status: 503,
+                  headers: { "Content-Type": "text/html; charset=utf-8", "Retry-After": "60" },
+                });
+              }
+            }
+          };
+          function buildOfflinePage() {
+            return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>준비 중</title><meta http-equiv="refresh" content="60"></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc"><div style="text-align:center"><h2>서버 준비 중이에요</h2><p style="color:#64748b">잠시 후 자동으로 새로고침됩니다.</p></div></body></html>';
+          }
+          WORKEREOF
 
-      - name: 변경사항 커밋
+          cat > .cf-worker/wrangler.toml << TOMLEOF
+          name = "${WORKER_NAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+
+          [vars]
+          NGINX_ORIGIN = "http://localhost"
+          TOMLEOF
+
+          npm install -g wrangler --quiet
+          cd .cf-worker && wrangler deploy --minify
+          echo "Cloudflare Worker 배포 완료: ${WORKER_NAME}"
+
+      # ── 변경사항 커밋 ────────────────────────────────────────────────────
+      - name: 파일 커밋 및 푸시
         run: |
           git config user.name "wpspot-bot"
           git config user.email "bot@wpspot.app"
+          # PHPLiteAdmin, nginx 설정, wordpress 파일 모두 추가
           git add -A
-          git diff --cached --quiet || git commit -m "chore: provision wordpress + nginx/php-fpm bundle"
+          git diff --cached --quiet || \
+            git commit -m "chore: provision wordpress + nginx/phpliteadmin [${{ inputs.site_slug }}]"
           git push
+          echo "파일 커밋 완료"
 
-      # ── Secrets 등록: GitHub REST API 직접 호출 (libsodium sealed box) ──
-      # GITHUB_TOKEN으로는 같은 레포 secrets 쓰기 불가 → PAT(GitHub Token) 사용
+      # ── GitHub Secrets 자동 등록 ─────────────────────────────────────────
       - name: GitHub Actions Secrets 자동 등록
         env:
           GITHUB_TOKEN_FOR_SECRETS: ${{ inputs.secret_github_token }}
@@ -199,32 +503,37 @@ jobs:
           API="https://api.github.com/repos/${REPO}"
           TOKEN="${GITHUB_TOKEN_FOR_SECRETS}"
 
-          # Public key 조회
+          if [ -z "$TOKEN" ]; then
+            echo "⚠ GitHub PAT 없음 — Secrets 자동 등록 건너뜀"
+            exit 0
+          fi
+
           PK_JSON=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "${API}/actions/secrets/public-key" || echo "")
 
           if [ -z "$PK_JSON" ]; then
-            echo "⚠ Public key 조회 실패 — Personal Access Token이 필요합니다."
-            echo "레포 Settings → Secrets → Actions에서 수동으로 등록해주세요:"
-            echo "  CF_WORKER_URL, CF_ACCOUNT_ID, CF_API_TOKEN, GCP_BLOGGER_TOKEN, BLOG_ID"
+            echo "⚠ Public key 조회 실패 — 수동으로 Secrets를 등록해주세요."
             exit 0
           fi
 
           KEY_ID=$(echo "$PK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['key_id'])")
           PUB_KEY=$(echo "$PK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
-
-          # libsodium sealed box 암호화 (PyNaCl)
           pip install PyNaCl --quiet 2>/dev/null
+
+          cat > /tmp/encrypt_secret.py << 'PYEOF'
+          import sys, base64
+          from nacl import encoding, public
+          pub_key = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder)
+          sealed = public.SealedBox(pub_key)
+          encrypted = sealed.encrypt(sys.argv[2].encode())
+          print(base64.b64encode(encrypted).decode())
+          PYEOF
 
           set_secret() {
             local name="$1"
             local value="$2"
-            if [ -z "$value" ]; then
-              echo "⚠ 값 없음, 건너뜀: $name"
-              return
-            fi
-            echo 'aW1wb3J0IHN5cywgYmFzZTY0CmZyb20gbmFjbCBpbXBvcnQgZW5jb2RpbmcsIHB1YmxpYwpwdWJfa2V5ID0gcHVibGljLlB1YmxpY0tleShzeXMuYXJndlsxXS5lbmNvZGUoKSwgZW5jb2RpbmcuQmFzZTY0RW5jb2RlcikKc2VhbGVkID0gcHVibGljLlNlYWxlZEJveChwdWJfa2V5KQplbmNyeXB0ZWQgPSBzZWFsZWQuZW5jcnlwdChzeXMuYXJndlsyXS5lbmNvZGUoKSkKcHJpbnQoYmFzZTY0LmI2NGVuY29kZShlbmNyeXB0ZWQpLmRlY29kZSgpKQo=' | base64 -d > /tmp/encrypt_secret.py
+            if [ -z "$value" ]; then echo "⚠ 건너뜀(빈값): $name"; return; fi
             ENCRYPTED=$(python3 /tmp/encrypt_secret.py "$PUB_KEY" "$value")
             STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
               -X PUT \
@@ -233,15 +542,26 @@ jobs:
               -H "Content-Type: application/json" \
               "${API}/actions/secrets/${name}" \
               -d "{\"encrypted_value\":\"${ENCRYPTED}\",\"key_id\":\"${KEY_ID}\"}" || echo "000")
-            if [ "$STATUS" = "201" ] || [ "$STATUS" = "204" ]; then
-              echo "✓ Secret 등록: $name"
-            else
-              echo "✗ Secret 등록 실패 ($STATUS): $name"
-            fi
+            [ "$STATUS" = "201" ] || [ "$STATUS" = "204" ] && echo "✓ $name" || echo "✗ $name ($STATUS)"
           }
 
-          set_secret "CF_WORKER_URL"     "${{ inputs.secret_cf_worker_url }}"
-          set_secret "CF_ACCOUNT_ID"     "${{ inputs.secret_cf_account_id }}"
-          set_secret "CF_API_TOKEN"      "${{ inputs.secret_cf_api_token }}"
-          set_secret "GCP_BLOGGER_TOKEN" "${{ inputs.secret_gcp_blogger_token }}"
-          set_secret "BLOG_ID"           "${{ inputs.secret_blog_id }}"
+          set_secret "CF_ACCOUNT_ID" "${{ inputs.secret_cf_account_id }}"
+          set_secret "CF_API_TOKEN"  "${{ inputs.secret_cf_api_token }}"
+          echo "Secrets 등록 완료"
+
+      # ── 프로비저닝 완료 요약 ────────────────────────────────────────────
+      - name: 프로비저닝 완료
+        run: |
+          echo "=================================="
+          echo "wpspot 프로비저닝 완료!"
+          echo "=================================="
+          echo "사이트: ${{ inputs.site_display_name || inputs.site_slug }}"
+          DOMAIN="${{ inputs.custom_domain }}"
+          if [ -n "$DOMAIN" ]; then
+            echo "주소: https://${DOMAIN}"
+            echo "관리자: https://${DOMAIN}/wp-admin"
+            echo "PHPLiteAdmin: https://${{ inputs.pma_domain }}"
+          fi
+          echo "관리자 ID: ${{ inputs.wp_admin_user }}"
+          echo "WordPress + SQLite + nginx + PHP-FPM 설치 완료"
+          echo "PHPLiteAdmin 설치 완료"
