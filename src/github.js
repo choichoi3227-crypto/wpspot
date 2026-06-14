@@ -13,7 +13,15 @@ function ghHeaders(token) {
   };
 }
 
-// 사용자 계정에 새 레포 생성
+// UTF-8 문자열 → base64 (멀티바이트 안전)
+function toBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+// 사용자 계정에 새 레포 생성 (auto_init: false — 워크플로우 포함 첫 커밋을 직접 올림)
 export async function createRepo(token, repoName) {
   const res = await fetch(`${GITHUB_API}/user/repos`, {
     method: "POST",
@@ -21,12 +29,11 @@ export async function createRepo(token, repoName) {
     body: JSON.stringify({
       name: repoName,
       private: true,
-      auto_init: true,
+      auto_init: false,  // 직접 첫 커밋을 올리기 위해 false
       description: "wpspot - WordPress-style Blogspot hosting (headless WordPress backend)",
     }),
   });
   if (!res.ok && res.status !== 422) {
-    // 422 = 이미 같은 이름의 레포 존재 (재시도 시 무시)
     const text = await res.text();
     throw new Error(`GitHub 레포 생성 실패: ${res.status} ${text}`);
   }
@@ -38,6 +45,80 @@ export async function getAuthenticatedUser(token) {
   const res = await fetch(`${GITHUB_API}/user`, { headers: ghHeaders(token) });
   if (!res.ok) throw new Error(`GitHub 사용자 정보 조회 실패: ${res.status}`);
   return res.json();
+}
+
+// Git Tree API를 이용해 여러 파일을 한 번의 커밋으로 올림
+// files: [{ path, content }]  (content는 UTF-8 문자열)
+// 레포가 완전히 비어 있는 상태(첫 커밋)에도 동작함
+export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
+  const base = `${GITHUB_API}/repos/${owner}/${repo}`;
+
+  // 1) 각 파일을 blob으로 생성
+  const blobs = await Promise.all(files.map(async ({ path, content }) => {
+    const res = await fetch(`${base}/git/blobs`, {
+      method: "POST",
+      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`blob 생성 실패 (${path}): ${res.status} ${text}`);
+    }
+    const data = await res.json();
+    return { path, sha: data.sha };
+  }));
+
+  // 2) tree 생성 (base_tree 없음 = 완전 새 트리)
+  const treeRes = await fetch(`${base}/git/trees`, {
+    method: "POST",
+    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tree: blobs.map(({ path, sha }) => ({
+        path,
+        mode: "100644",
+        type: "blob",
+        sha,
+      })),
+    }),
+  });
+  if (!treeRes.ok) {
+    const text = await treeRes.text();
+    throw new Error(`tree 생성 실패: ${treeRes.status} ${text}`);
+  }
+  const tree = await treeRes.json();
+
+  // 3) 커밋 생성 (parent 없음 = 최초 커밋)
+  const commitRes = await fetch(`${base}/git/commits`, {
+    method: "POST",
+    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message,
+      tree: tree.sha,
+      // parents: []  — 생략하면 orphan commit (GitHub이 첫 커밋으로 인식)
+    }),
+  });
+  if (!commitRes.ok) {
+    const text = await commitRes.text();
+    throw new Error(`커밋 생성 실패: ${commitRes.status} ${text}`);
+  }
+  const commit = await commitRes.json();
+
+  // 4) main 브랜치 생성 및 커밋 참조 설정
+  const refRes = await fetch(`${base}/git/refs`, {
+    method: "POST",
+    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ref: "refs/heads/main",
+      sha: commit.sha,
+    }),
+  });
+  if (!refRes.ok && refRes.status !== 422) {
+    // 422 = 이미 브랜치 존재 (재시도 시 무시)
+    const text = await refRes.text();
+    throw new Error(`브랜치 생성 실패: ${refRes.status} ${text}`);
+  }
+
+  return commit;
 }
 
 // 레포에 파일 생성/업데이트 (Contents API, UTF-8 텍스트)
@@ -52,12 +133,7 @@ export async function putFile(token, owner, repo, path, contentString, message) 
     sha = data.sha;
   }
 
-  // UTF-8 → base64 (멀티바이트 안전)
-  const bytes = new TextEncoder().encode(contentString);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  const content = btoa(bin);
-
+  const content = toBase64(contentString);
   const body = { message, content, branch: "main" };
   if (sha) body.sha = sha;
 
@@ -74,8 +150,6 @@ export async function putFile(token, owner, repo, path, contentString, message) 
 }
 
 // GitHub Actions 워크플로우 dispatch
-// ※ 워크플로우 파일이 main 브랜치에 푸시된 후 GitHub가 인식하기까지 약간의 지연이 있음.
-//   dispatchWorkflow 전에 충분히 기다려야 한다 (호출 측에서 대기).
 export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, inputs) {
   const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
   const res = await fetch(url, {
@@ -88,6 +162,33 @@ export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, in
     throw new Error(`워크플로우 실행 실패 (${workflowFile}): ${res.status} ${text}`);
   }
   return true;
+}
+
+// GitHub Actions가 workflow_dispatch 트리거를 인식할 때까지 polling 대기
+// createInitialCommit으로 워크플로우를 포함해 올렸어도 GitHub 내부 인덱싱에
+// 수 초가 걸릴 수 있으므로 active 상태가 될 때까지 폴링한다.
+export async function waitForWorkflowReady(token, owner, repo, workflowFile, maxWaitMs = 30000) {
+  const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
+  const interval = 2000; // 2초마다 폴링
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, interval));
+    try {
+      const res = await fetch(url, { headers: ghHeaders(token) });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.state === "active") return true;
+      }
+    } catch (_) {
+      // 네트워크 오류는 무시하고 재시도
+    }
+  }
+
+  throw new Error(
+    `워크플로우(${workflowFile})가 ${maxWaitMs / 1000}초 내에 활성화되지 않았습니다. ` +
+    "GitHub 레포 Actions 탭에서 직접 provision 워크플로우를 실행해주세요."
+  );
 }
 
 // 디렉토리 목록 또는 파일 메타데이터 조회
@@ -177,53 +278,14 @@ export async function getRepoPublicKey(token, owner, repo) {
     { headers: ghHeaders(token) }
   );
   if (!res.ok) throw new Error(`Public key 조회 실패: ${res.status}`);
-  return res.json(); // { key_id, key }
+  return res.json();
 }
 
-// 레포 Secret 설정 (GitHub Actions에서 사용할 시크릿 자동 주입)
-// value는 평문 문자열. libsodium sealed box로 암호화해야 하지만
-// Workers 환경에서는 libsodium이 없으므로 Web Crypto + SubtleCrypto로 대체.
-// GitHub는 libsodium sealed box(X25519+XSalsa20Poly1305)를 요구하므로
-// 실제 암호화는 Worker 내에서 직접 처리할 수 없다.
-// → 이 함수는 secret 이름 목록을 반환하고, 실제 암호화 없이 평문 전달 경고를 남긴다.
-// 프로덕션에서는 GitHub CLI(`gh secret set`) 또는 별도 서버를 사용해야 한다.
-// worker.js에서는 이 함수를 통해 필요한 secrets 목록을 알 수 있다.
 export function getRequiredSecrets(cfWorkerUrl, cfAccountId, cfApiToken, bloggerToken) {
   return {
     CF_WORKER_URL: cfWorkerUrl,
     CF_ACCOUNT_ID: cfAccountId,
-    CF_API_TOKEN: cfApiToken,         // Cloudflare API Token (Pages 배포용)
-    GCP_BLOGGER_TOKEN: bloggerToken,  // Blogger OAuth Access Token
+    CF_API_TOKEN: cfApiToken,
+    GCP_BLOGGER_TOKEN: bloggerToken,
   };
-}
-
-// GitHub Actions가 workflow_dispatch 트리거를 인식할 때까지 polling 대기
-// 워크플로우 파일을 푸시한 직후 바로 dispatch하면 422 에러 발생:
-// "Workflow does not have 'workflow_dispatch' trigger"
-// → GET /repos/{owner}/{repo}/actions/workflows/{file} 로 상태를 확인하며 대기
-export async function waitForWorkflowReady(token, owner, repo, workflowFile, maxWaitMs = 60000) {
-  const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
-  const interval = 3000; // 3초마다 폴링
-  const deadline = Date.now() + maxWaitMs;
-
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, interval));
-
-    try {
-      const res = await fetch(url, { headers: ghHeaders(token) });
-      if (res.ok) {
-        const data = await res.json();
-        // state가 "active"이면 dispatch 가능
-        if (data.state === "active") return true;
-      }
-    } catch (_) {
-      // 네트워크 오류는 무시하고 재시도
-    }
-  }
-
-  // 최대 대기 시간 초과 시에도 dispatch 시도 (GitHub가 인식 중일 수 있음)
-  throw new Error(
-    `워크플로우(${workflowFile})가 ${maxWaitMs / 1000}초 내에 활성화되지 않았습니다. ` +
-    "GitHub 레포 Actions 탭에서 직접 provision 워크플로우를 실행해주세요."
-  );
 }
