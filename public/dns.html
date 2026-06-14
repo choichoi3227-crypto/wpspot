@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DNS 관리 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    .dns-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: var(--fs-body-3);
+    }
+    .dns-table th {
+      text-align: left;
+      padding: var(--space-2) var(--space-3);
+      border-bottom: 2px solid var(--border-secondary);
+      color: var(--text-secondary);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .dns-table td {
+      padding: var(--space-2) var(--space-3);
+      border-bottom: 1px solid var(--border-secondary);
+      vertical-align: middle;
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dns-table tr:hover td { background: var(--fill-weak); }
+    .type-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; font-family: monospace;
+      padding: 2px 7px; border-radius: var(--radius-xs);
+      min-width: 46px;
+    }
+    .type-a     { background: #dbeafe; color: #1d4ed8; }
+    .type-aaaa  { background: #ede9fe; color: #6d28d9; }
+    .type-cname { background: #d1fae5; color: #065f46; }
+    .type-txt   { background: #fef3c7; color: #92400e; }
+    .type-ns    { background: #fee2e2; color: #991b1b; }
+    .type-mx    { background: #f3e8ff; color: #7c3aed; }
+    .type-alias { background: #fce7f3; color: #be185d; }
+    .proxied-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; padding: 2px 8px; border-radius: var(--radius-full);
+    }
+    .proxied-on  { background: #fff7ed; color: #c2410c; }
+    .proxied-off { background: var(--fill-secondary); color: var(--text-secondary); }
+
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: var(--bg-overlay);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--color-white);
+      border-radius: var(--radius-2xl);
+      padding: var(--space-6);
+      width: 100%; max-width: 480px;
+      box-shadow: var(--shadow-3);
+      margin: var(--space-4);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal__title { font-size: var(--fs-h3); font-weight: 700; margin-bottom: var(--space-4); }
+    .alias-hint {
+      background: var(--fill-weak);
+      border: 1px solid var(--border-secondary);
+      border-radius: var(--radius-s);
+      padding: var(--space-3);
+      font-size: var(--fs-body-3);
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-top: var(--space-2);
+    }
+    .card-table { background: var(--color-white); border: 1px solid var(--border-secondary); border-radius: var(--radius-l); overflow: hidden; box-shadow: var(--shadow-1); overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__title" id="pageTitle">DNS 관리</span>
+      <a href="/domains.html" class="btn btn--ghost btn--s">도메인 목록</a>
+    </div>
+
+    <div class="screen">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-5);">
+        <div>
+          <h1 class="h1" style="margin:0;" id="domainTitle">DNS 레코드</h1>
+          <p class="caption" style="margin-top:4px;" id="domainSub"></p>
+        </div>
+        <button class="btn btn--primary btn--m" onclick="openAddModal()">+ 레코드 추가</button>
+      </div>
+
+      <div class="card-table">
+        <table class="dns-table">
+          <thead>
+            <tr>
+              <th>타입</th>
+              <th>이름</th>
+              <th>값</th>
+              <th>TTL</th>
+              <th>프록시</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="dnsBody">
+            <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-tertiary);">불러오는 중…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Worker Routes (ALIAS) -->
+      <h2 class="title-1 mt-6" style="margin-bottom:var(--space-3);">Worker Routes (Alias)</h2>
+      <div id="routesList" style="display:flex;flex-direction:column;gap:var(--space-2);"></div>
+    </div>
+  </div>
+
+  <!-- 레코드 추가/수정 모달 -->
+  <div class="modal-overlay" id="recordModal">
+    <div class="modal">
+      <div class="modal__title" id="modalTitle">DNS 레코드 추가</div>
+
+      <div class="field">
+        <label class="field__label">타입</label>
+        <select class="field__input" id="recType" onchange="onTypeChange()">
+          <option value="A">A</option>
+          <option value="AAAA">AAAA</option>
+          <option value="CNAME">CNAME</option>
+          <option value="TXT">TXT</option>
+          <option value="NS">NS</option>
+          <option value="MX">MX</option>
+          <option value="ALIAS">ALIAS (Worker Route)</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label class="field__label">이름 <span style="font-weight:400;color:var(--text-secondary);">(서브도메인 또는 @)</span></label>
+        <input class="field__input" type="text" id="recName" placeholder="@ 또는 www" />
+      </div>
+
+      <div id="contentField" class="field">
+        <label class="field__label" id="contentLabel">값 (IPv4)</label>
+        <input class="field__input" type="text" id="recContent" placeholder="1.2.3.4" />
+      </div>
+
+      <!-- ALIAS 전용 -->
+      <div id="aliasField" class="field" style="display:none;">
+        <label class="field__label">Worker 이름</label>
+        <input class="field__input" type="text" id="recWorkerName" placeholder="wpspot-my-site" />
+        <div class="alias-hint">
+          💡 Cloudflare Worker의 이름을 입력하세요. 해당 도메인 경로로 들어오는 요청이 Worker로 라우팅돼요.<br/>
+          예: 이름 <code>www</code>, Worker <code>wpspot-my-site</code> → <code>www.example.com/*</code> → Worker
+        </div>
+      </div>
+
+      <div id="ttlProxyRow" class="field" style="display:flex;gap:var(--space-3);">
+        <div style="flex:1;">
+          <label class="field__label">TTL</label>
+          <select class="field__input" id="recTtl">
+            <option value="1">자동</option>
+            <option value="60">1분</option>
+            <option value="300">5분</option>
+            <option value="3600">1시간</option>
+            <option value="86400">1일</option>
+          </select>
+        </div>
+        <div id="proxyField" style="flex:1;">
+          <label class="field__label">CF 프록시</label>
+          <select class="field__input" id="recProxied">
+            <option value="true">🟠 프록시 켜기</option>
+            <option value="false">☁ DNS만</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="mxPriField" class="field" style="display:none;">
+        <label class="field__label">우선순위 (MX)</label>
+        <input class="field__input" type="number" id="recPriority" value="10" min="0" max="65535" />
+      </div>
+
+      <div id="modalError" style="color:var(--text-danger);font-size:var(--fs-body-3);margin-top:var(--space-2);display:none;"></div>
+
+      <div style="display:flex;gap:var(--space-2);margin-top:var(--space-5);">
+        <button class="btn btn--ghost btn--m" style="flex:1" onclick="closeModal()">취소</button>
+        <button class="btn btn--primary btn--m" style="flex:2" onclick="saveRecord()" id="saveBtn">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const zoneId = params.get("zone");
+    const domainName = params.get("domain") || "";
+    let records = [];
+    let routes = [];
+    let editingId = null;
+
+    document.getElementById("domainTitle").textContent = domainName || "DNS 레코드";
+    document.getElementById("domainSub").textContent = zoneId || "";
+    document.getElementById("pageTitle").textContent = `DNS — ${domainName}`;
+
+    if (wpspot.requireAuth()) {
+      if (!zoneId) {
+        document.getElementById("dnsBody").innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-danger);">Zone ID가 없어요. 도메인 목록에서 접근해주세요.</td></tr>`;
+      } else {
+        loadAll();
+      }
+    }
+
+    async function loadAll() {
+      try {
+        const data = await wpspot.api(`/api/domains/${encodeURIComponent(zoneId)}/dns`);
+        records = data.records || [];
+        renderRecords();
+        // Worker Routes 로드 (별도 API 없으므로 ALIAS 타입 records로 대체 표시)
+        renderRoutes();
+      } catch (e) {
+        document.getElementById("dnsBody").innerHTML =
+          `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-danger);">${wpspot.escapeHtml(e.message)}</td></tr>`;
+      }
+    }
+
+    function typeClass(t) {
+      const m = { A:"type-a", AAAA:"type-aaaa", CNAME:"type-cname", TXT:"type-txt", NS:"type-ns", MX:"type-mx" };
+      return m[t] || "type-alias";
+    }
+
+    function renderRecords() {
+      const tbody = document.getElementById("dnsBody");
+      if (!records.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-tertiary);">DNS 레코드가 없어요.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = records.map(r => `
+        <tr>
+          <td><span class="type-badge ${typeClass(r.type)}">${wpspot.escapeHtml(r.type)}</span></td>
+          <td title="${wpspot.escapeHtml(r.name)}">${wpspot.escapeHtml(r.name)}</td>
+          <td title="${wpspot.escapeHtml(r.content || '')}">${wpspot.escapeHtml(r.content || "")}</td>
+          <td>${r.ttl === 1 ? "자동" : r.ttl + "s"}</td>
+          <td>
+            ${r.proxiable
+              ? `<span class="proxied-badge ${r.proxied ? 'proxied-on' : 'proxied-off'}">${r.proxied ? '🟠 ON' : '☁ OFF'}</span>`
+              : '<span style="color:var(--text-tertiary);">—</span>'}
+          </td>
+          <td>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn--ghost btn--s" onclick='editRecord(${JSON.stringify(r)})'>수정</button>
+              <button class="btn btn--ghost btn--s" style="color:var(--text-danger);" onclick='deleteRecord(${JSON.stringify(r.id)}, ${JSON.stringify(r.name)})'>삭제</button>
+            </div>
+          </td>
+        </tr>
+      `).join("");
+    }
+
+    function renderRoutes() {
+      const el = document.getElementById("routesList");
+      const aliasRoutes = records.filter(r => r.type === "ALIAS");
+      if (!aliasRoutes.length) {
+        el.innerHTML = `<div style="color:var(--text-tertiary);font-size:var(--fs-body-3);">등록된 Worker Route가 없어요. 위에서 타입 ALIAS를 선택해 추가해주세요.</div>`;
+        return;
+      }
+      el.innerHTML = aliasRoutes.map(r => `
+        <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);background:var(--color-white);border:1px solid var(--border-secondary);border-radius:var(--radius-m);">
+          <span class="type-badge type-alias">ALIAS</span>
+          <span style="flex:1;font-family:monospace;font-size:var(--fs-body-3);">${wpspot.escapeHtml(r.name)}</span>
+          <span style="color:var(--text-secondary);font-size:var(--fs-body-3);">→ ${wpspot.escapeHtml(r.content || "")}</span>
+          <button class="btn btn--ghost btn--s" style="color:var(--text-danger);" onclick='deleteRecord(${JSON.stringify(r.id)}, ${JSON.stringify(r.name)})'>삭제</button>
+        </div>
+      `).join("");
+    }
+
+    function onTypeChange() {
+      const t = document.getElementById("recType").value;
+      const isAlias = t === "ALIAS";
+      const isMx = t === "MX";
+      document.getElementById("contentField").style.display = isAlias ? "none" : "";
+      document.getElementById("aliasField").style.display = isAlias ? "" : "none";
+      document.getElementById("ttlProxyRow").style.display = isAlias ? "none" : "";
+      document.getElementById("mxPriField").style.display = isMx ? "" : "none";
+      document.getElementById("proxyField").style.display = (t === "A" || t === "AAAA" || t === "CNAME") ? "" : "none";
+
+      const labels = { A:"값 (IPv4)", AAAA:"값 (IPv6)", CNAME:"대상 (CNAME)", TXT:"TXT 값", NS:"네임서버", MX:"메일 서버" };
+      const pholds = { A:"1.2.3.4", AAAA:"2001:db8::1", CNAME:"example.com", TXT:"v=spf1 include:...", NS:"ns1.example.com", MX:"mail.example.com" };
+      document.getElementById("contentLabel").textContent = labels[t] || "값";
+      document.getElementById("recContent").placeholder = pholds[t] || "";
+    }
+
+    function openAddModal() {
+      editingId = null;
+      document.getElementById("modalTitle").textContent = "DNS 레코드 추가";
+      document.getElementById("recType").value = "A";
+      document.getElementById("recName").value = "";
+      document.getElementById("recContent").value = "";
+      document.getElementById("recWorkerName").value = "";
+      document.getElementById("recTtl").value = "1";
+      document.getElementById("recProxied").value = "true";
+      document.getElementById("recPriority").value = "10";
+      document.getElementById("modalError").style.display = "none";
+      onTypeChange();
+      document.getElementById("recordModal").classList.add("open");
+    }
+
+    function editRecord(r) {
+      editingId = r.id;
+      document.getElementById("modalTitle").textContent = "DNS 레코드 수정";
+      document.getElementById("recType").value = r.type;
+      document.getElementById("recName").value = r.name;
+      document.getElementById("recContent").value = r.content || "";
+      document.getElementById("recTtl").value = r.ttl || "1";
+      document.getElementById("recProxied").value = r.proxied ? "true" : "false";
+      document.getElementById("recPriority").value = r.priority || 10;
+      document.getElementById("modalError").style.display = "none";
+      onTypeChange();
+      document.getElementById("recordModal").classList.add("open");
+    }
+
+    async function saveRecord() {
+      const type = document.getElementById("recType").value;
+      const name = document.getElementById("recName").value.trim();
+      const content = document.getElementById("recContent").value.trim();
+      const workerName = document.getElementById("recWorkerName").value.trim();
+      const ttl = parseInt(document.getElementById("recTtl").value);
+      const proxied = document.getElementById("recProxied").value === "true";
+      const priority = parseInt(document.getElementById("recPriority").value) || 10;
+      const errEl = document.getElementById("modalError");
+      errEl.style.display = "none";
+
+      if (!name) { errEl.textContent = "이름을 입력해주세요."; errEl.style.display = ""; return; }
+      if (type === "ALIAS" && !workerName) { errEl.textContent = "Worker 이름을 입력해주세요."; errEl.style.display = ""; return; }
+      if (type !== "ALIAS" && !content) { errEl.textContent = "값을 입력해주세요."; errEl.style.display = ""; return; }
+
+      const btn = document.getElementById("saveBtn");
+      btn.disabled = true; btn.textContent = "저장 중…";
+
+      try {
+        const fullName = name === "@" ? domainName : (name.includes(domainName) ? name : `${name}.${domainName}`);
+        if (type === "ALIAS") {
+          // Worker Route
+          await wpspot.api(`/api/domains/${encodeURIComponent(zoneId)}/dns`, {
+            method: "POST",
+            body: JSON.stringify({ type: "ALIAS", name: fullName, workerName }),
+          });
+        } else {
+          const body = { type, name: fullName, content, ttl };
+          if (type === "A" || type === "AAAA" || type === "CNAME") body.proxied = proxied;
+          if (type === "MX") body.priority = priority;
+
+          if (editingId) {
+            await wpspot.api(`/api/domains/${encodeURIComponent(zoneId)}/dns/${encodeURIComponent(editingId)}`, {
+              method: "PATCH",
+              body: JSON.stringify(body),
+            });
+          } else {
+            await wpspot.api(`/api/domains/${encodeURIComponent(zoneId)}/dns`, {
+              method: "POST",
+              body: JSON.stringify(body),
+            });
+          }
+        }
+
+        closeModal();
+        wpspot.toast(editingId ? "레코드가 수정됐어요." : "레코드가 추가됐어요.");
+        loadAll();
+      } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = "";
+      } finally {
+        btn.disabled = false; btn.textContent = "저장";
+      }
+    }
+
+    async function deleteRecord(recordId, name) {
+      if (!confirm(`"${name}" 레코드를 삭제할까요?`)) return;
+      try {
+        await wpspot.api(`/api/domains/${encodeURIComponent(zoneId)}/dns/${encodeURIComponent(recordId)}`, {
+          method: "DELETE",
+        });
+        wpspot.toast("삭제됐어요.");
+        loadAll();
+      } catch (e) {
+        wpspot.toast(e.message, "error");
+      }
+    }
+
+    function closeModal() {
+      document.getElementById("recordModal").classList.remove("open");
+    }
+    document.getElementById("recordModal").addEventListener("click", e => {
+      if (e.target === document.getElementById("recordModal")) closeModal();
+    });
+  </script>
+</body>
+</html>

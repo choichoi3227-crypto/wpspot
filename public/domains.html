@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>도메인 관리 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    .domain-card {
+      background: var(--color-white);
+      border: 1px solid var(--border-secondary);
+      border-radius: var(--radius-l);
+      padding: var(--space-4) var(--space-5);
+      box-shadow: var(--shadow-1);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .domain-card__header {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      justify-content: space-between;
+    }
+    .domain-card__name {
+      font-size: var(--fs-title-1);
+      font-weight: 600;
+      letter-spacing: var(--ls-title-1);
+      color: var(--text-primary);
+    }
+    .domain-card__ns {
+      font-size: var(--fs-body-3);
+      color: var(--text-secondary);
+      line-height: 1.6;
+      background: var(--fill-weak);
+      padding: var(--space-2) var(--space-3);
+      border-radius: var(--radius-s);
+      font-family: monospace;
+    }
+    .domain-card__footer {
+      display: flex;
+      gap: var(--space-2);
+      align-items: center;
+      margin-top: var(--space-1);
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: var(--radius-full);
+      flex-shrink: 0;
+    }
+    .status-dot--active  { background: var(--fill-success); }
+    .status-dot--pending { background: var(--fill-warning); }
+    .status-dot--error   { background: var(--fill-danger); }
+
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: var(--bg-overlay);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--color-white);
+      border-radius: var(--radius-2xl);
+      padding: var(--space-6);
+      width: 100%; max-width: 440px;
+      box-shadow: var(--shadow-3);
+      margin: var(--space-4);
+    }
+    .modal__title { font-size: var(--fs-h3); font-weight: 700; margin-bottom: var(--space-4); }
+
+    .list { display: flex; flex-direction: column; gap: var(--space-3); }
+    .empty { text-align: center; padding: var(--space-12) var(--space-4); color: var(--text-tertiary); font-size: var(--fs-body-2); }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__title">도메인 관리</span>
+      <a href="/dashboard.html" class="btn btn--ghost btn--s">대시보드</a>
+    </div>
+
+    <div class="screen">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-5);">
+        <h1 class="h1" style="margin:0;">내 도메인</h1>
+        <button class="btn btn--primary btn--m" onclick="openAddModal()">+ 도메인 추가</button>
+      </div>
+
+      <div id="domainList" class="list">
+        <div class="empty">불러오는 중…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 도메인 추가 모달 -->
+  <div class="modal-overlay" id="addModal">
+    <div class="modal">
+      <div class="modal__title">도메인 추가</div>
+      <div class="field">
+        <label class="field__label">도메인 이름</label>
+        <input class="field__input" type="text" id="domainInput" placeholder="example.com" autocomplete="off" />
+        <div class="field__help">Cloudflare에 네임서버 방식으로 등록돼요. 등록 후 표시되는 네임서버를 도메인 등록 업체에서 설정해주세요.</div>
+      </div>
+      <div id="addError" style="color:var(--text-danger);font-size:var(--fs-body-3);margin-top:var(--space-2);display:none;"></div>
+      <div style="display:flex;gap:var(--space-2);margin-top:var(--space-5);">
+        <button class="btn btn--ghost btn--m" style="flex:1" onclick="closeModal('addModal')">취소</button>
+        <button class="btn btn--primary btn--m" style="flex:2" onclick="addDomain()" id="addBtn">추가하기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 네임서버 안내 모달 -->
+  <div class="modal-overlay" id="nsModal">
+    <div class="modal">
+      <div class="modal__title">네임서버 설정 안내</div>
+      <p class="body-2" style="margin-bottom:var(--space-3);">도메인 등록 업체(가비아, 후이즈 등)의 네임서버 설정에서 아래 네임서버로 변경해주세요.</p>
+      <div class="domain-card__ns" id="nsContent"></div>
+      <p class="caption" style="margin-top:var(--space-3);color:var(--text-secondary);">⏳ 네임서버 변경 후 활성화까지 최대 24~48시간이 소요될 수 있어요.<br/>Cloudflare 대시보드에서 실시간 상태를 확인할 수 있어요.</p>
+      <button class="btn btn--primary btn--l" style="width:100%;margin-top:var(--space-4);" onclick="closeModal('nsModal')">확인</button>
+    </div>
+  </div>
+
+  <!-- 호스팅 연결 모달 -->
+  <div class="modal-overlay" id="connectModal">
+    <div class="modal">
+      <div class="modal__title">호스팅 연결</div>
+      <p class="body-2" style="margin-bottom:var(--space-3);">연결할 호스팅(사이트)을 선택해주세요.</p>
+      <div id="siteSelectList" style="display:flex;flex-direction:column;gap:var(--space-2);max-height:240px;overflow-y:auto;"></div>
+      <div id="connectError" style="color:var(--text-danger);font-size:var(--fs-body-3);margin-top:var(--space-2);display:none;"></div>
+      <button class="btn btn--ghost btn--m" style="width:100%;margin-top:var(--space-4);" onclick="closeModal('connectModal')">닫기</button>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    let zones = [];
+    let sites = [];
+    let selectedZone = null;
+
+    if (wpspot.requireAuth()) load();
+
+    async function load() {
+      try {
+        const [domainData, siteData] = await Promise.all([
+          wpspot.api("/api/domains"),
+          wpspot.api("/api/sites"),
+        ]);
+        zones = domainData.zones || [];
+        sites = (siteData.sites || []).filter(s => s.status === "active");
+        renderDomains();
+      } catch (e) {
+        document.getElementById("domainList").innerHTML =
+          `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function renderDomains() {
+      const el = document.getElementById("domainList");
+      if (!zones.length) {
+        el.innerHTML = `<div class="empty">등록된 도메인이 없어요.<br/>위의 "도메인 추가" 버튼으로 추가해보세요.</div>`;
+        return;
+      }
+      el.innerHTML = zones.map(z => domainCard(z)).join("");
+    }
+
+    function statusDot(status) {
+      const cls = status === "active" ? "active" : status === "pending" ? "pending" : "error";
+      const label = status === "active" ? "활성" : status === "pending" ? "네임서버 대기" : "오류";
+      return `<span class="status-dot status-dot--${cls}"></span><span style="font-size:var(--fs-body-3);color:var(--text-secondary);">${label}</span>`;
+    }
+
+    function domainCard(z) {
+      const ns = z.name_servers || [];
+      return `
+        <div class="domain-card">
+          <div class="domain-card__header">
+            <span class="domain-card__name">${wpspot.escapeHtml(z.name)}</span>
+            <div style="display:flex;align-items:center;gap:6px;">${statusDot(z.status)}</div>
+          </div>
+          ${ns.length ? `
+            <div>
+              <div style="font-size:var(--fs-body-3);color:var(--text-secondary);margin-bottom:var(--space-1);">네임서버</div>
+              <div class="domain-card__ns">${ns.map(n => wpspot.escapeHtml(n)).join("<br/>")}</div>
+            </div>` : ""}
+          <div class="domain-card__footer">
+            <button class="btn btn--secondary btn--s" onclick='showNs(${JSON.stringify(ns)})'>네임서버 보기</button>
+            <a class="btn btn--secondary btn--s" href="/dns.html?zone=${encodeURIComponent(z.id)}&domain=${encodeURIComponent(z.name)}">DNS 관리</a>
+            <button class="btn btn--primary btn--s" onclick='openConnectModal(${JSON.stringify(z.id)}, ${JSON.stringify(z.name)})'>호스팅 연결</button>
+            <button class="btn btn--ghost btn--s" style="color:var(--text-danger);margin-left:auto;" onclick='deleteDomain(${JSON.stringify(z.id)}, ${JSON.stringify(z.name)})'>삭제</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function showNs(ns) {
+      document.getElementById("nsContent").innerHTML = ns.length
+        ? ns.map(n => wpspot.escapeHtml(n)).join("<br/>")
+        : "네임서버 정보가 없어요.";
+      openModal("nsModal");
+    }
+
+    async function deleteDomain(zoneId, name) {
+      if (!confirm(`"${name}" 도메인을 Cloudflare에서 삭제할까요?\n도메인 등록은 그대로 유지돼요.`)) return;
+      try {
+        await wpspot.api(`/api/domains/${encodeURIComponent(zoneId)}`, { method: "DELETE" });
+        wpspot.toast("도메인이 삭제됐어요.");
+        load();
+      } catch (e) {
+        wpspot.toast(e.message, "error");
+      }
+    }
+
+    function openConnectModal(zoneId, zoneName) {
+      selectedZone = { id: zoneId, name: zoneName };
+      const el = document.getElementById("siteSelectList");
+      document.getElementById("connectError").style.display = "none";
+      if (!sites.length) {
+        el.innerHTML = `<div style="color:var(--text-secondary);font-size:var(--fs-body-3);">연결 가능한 호스팅이 없어요. 먼저 워드프레스 호스팅을 생성하고 프로비저닝해주세요.</div>`;
+      } else {
+        el.innerHTML = sites.map(s => `
+          <button class="btn btn--secondary btn--m" style="text-align:left;" onclick='connectSite(${JSON.stringify(s.id)}, ${JSON.stringify(zoneName)})'>
+            <strong>${wpspot.escapeHtml(s.site_name)}</strong>
+            <span style="font-size:var(--fs-body-3);color:var(--text-secondary);margin-left:8px;">${wpspot.escapeHtml(s.github_repo || "")}</span>
+          </button>
+        `).join("");
+      }
+      openModal("connectModal");
+    }
+
+    async function connectSite(siteId, zoneName) {
+      try {
+        const zone = selectedZone;
+        await wpspot.api(`/api/sites/${siteId}/connect-domain`, {
+          method: "POST",
+          body: JSON.stringify({ customDomain: zone.name, zoneId: zone.id }),
+        });
+        wpspot.toast(`${zoneName} 도메인이 연결됐어요.`);
+        closeModal("connectModal");
+      } catch (e) {
+        document.getElementById("connectError").textContent = e.message;
+        document.getElementById("connectError").style.display = "";
+      }
+    }
+
+    async function addDomain() {
+      const domainName = document.getElementById("domainInput").value.trim();
+      const errEl = document.getElementById("addError");
+      errEl.style.display = "none";
+      if (!domainName) { errEl.textContent = "도메인을 입력해주세요."; errEl.style.display = ""; return; }
+
+      const btn = document.getElementById("addBtn");
+      btn.disabled = true; btn.textContent = "등록 중…";
+      try {
+        const data = await wpspot.api("/api/domains", {
+          method: "POST",
+          body: JSON.stringify({ domainName }),
+        });
+        document.getElementById("domainInput").value = "";
+        closeModal("addModal");
+        wpspot.toast("도메인이 등록됐어요!");
+        // 네임서버 바로 보여주기
+        const ns = data.zone?.name_servers || [];
+        if (ns.length) setTimeout(() => showNs(ns), 300);
+        load();
+      } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = "";
+      } finally {
+        btn.disabled = false; btn.textContent = "추가하기";
+      }
+    }
+
+    function openAddModal() {
+      document.getElementById("addError").style.display = "none";
+      document.getElementById("domainInput").value = "";
+      openModal("addModal");
+    }
+    function openModal(id) { document.getElementById(id).classList.add("open"); }
+    function closeModal(id) { document.getElementById(id).classList.remove("open"); }
+
+    document.querySelectorAll(".modal-overlay").forEach(el => {
+      el.addEventListener("click", e => { if (e.target === el) el.classList.remove("open"); });
+    });
+  </script>
+</body>
+</html>
