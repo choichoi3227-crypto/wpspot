@@ -333,15 +333,14 @@ async function handleApi(request, env, url) {
       ]);
 
       // 초기 커밋 (워크플로우 + 빈 deploy 디렉토리 placeholder)
-      await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
+      const { defaultBranch } = await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
         { path: ".github/workflows/provision.yml",       content: provisionYml },
         { path: ".github/workflows/nginx-keepalive.yml", content: keepaliveYml || "# keepalive" },
         { path: "deploy/.gitkeep",                       content: "" },
         { path: "deploy/.worker_name",                   content: workerName },
       ], "chore: initial wpspot setup");
 
-
-      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
+      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", defaultBranch, {
         site_slug:             site.site_slug,
         site_display_name:     site.site_name,
         custom_domain:         customDomain,
