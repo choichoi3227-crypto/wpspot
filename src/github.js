@@ -33,9 +33,23 @@ export async function createRepo(token, repoName) {
     const text = await res.text();
     throw new Error(`GitHub 레포 생성 실패: ${res.status} ${text}`);
   }
-  const repoData = await res.json().catch(() => ({}));
-  const owner = repoData.owner?.login;
+
+  // 422 = 이미 존재하는 레포 — repoData가 없을 수 있으므로 API로 직접 조회
+  let repoData = await res.json().catch(() => ({}));
+  const ghUser = repoData.owner?.login
+    ? repoData.owner.login
+    : await (async () => {
+        const u = await fetch(`${GITHUB_API}/user`, { headers: ghHeaders(token) });
+        return u.ok ? (await u.json()).login : null;
+      })();
+  const owner = ghUser;
   const repo  = repoData.name || repoName;
+
+  // 레포가 이미 있었으면 최신 데이터 가져오기
+  if (!repoData.owner) {
+    const r = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
+    if (r.ok) repoData = await r.json();
+  }
 
   // auto_init 커밋이 실제로 생성될 때까지 최대 30초 폴링
   if (owner) {
@@ -46,7 +60,7 @@ export async function createRepo(token, repoName) {
       });
       if (r.ok) {
         const commits = await r.json().catch(() => []);
-        if (Array.isArray(commits) && commits.length > 0) break; // 초기 커밋 확인
+        if (Array.isArray(commits) && commits.length > 0) break;
       }
       await new Promise(r => setTimeout(r, 2000));
     }
@@ -97,7 +111,7 @@ export async function createInitialCommit(token, owner, repo, files, message = "
 
     const body = {
       message: `${message} — ${path}`,
-      content: toBase64(content),
+      content: toBase64(content || " "),
       branch: defaultBranch,
     };
     if (sha) body.sha = sha;
