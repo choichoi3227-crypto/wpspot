@@ -24,7 +24,7 @@ export async function createRepo(token, repoName) {
     body: JSON.stringify({
       name: repoName,
       private: true,
-      auto_init: true,
+      auto_init: false,
       description: "wpspot — WordPress hosting (nginx + PHP-FPM + SQLite)",
     }),
   });
@@ -44,30 +44,6 @@ export async function getAuthenticatedUser(token) {
 export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
   const base = `${GITHUB_API}/repos/${owner}/${repo}`;
 
-  // 레포의 기본 브랜치(main 또는 master) HEAD SHA를 가져옴
-  // auto_init:true 로 생성된 레포는 초기 커밋이 존재하므로 base_tree로 사용
-  let parentSha = null;
-  let baseTreeSha = null;
-  let defaultBranch = "main";
-
-  const repoInfoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
-  if (repoInfoRes.ok) {
-    const repoInfo = await repoInfoRes.json();
-    defaultBranch = repoInfo.default_branch || "main";
-    const refRes = await fetch(`${base}/git/ref/heads/${defaultBranch}`, { headers: ghHeaders(token) });
-    if (refRes.ok) {
-      const refData = await refRes.json();
-      parentSha = refData.object?.sha || null;
-      if (parentSha) {
-        const commitRes = await fetch(`${base}/git/commits/${parentSha}`, { headers: ghHeaders(token) });
-        if (commitRes.ok) {
-          const commitData = await commitRes.json();
-          baseTreeSha = commitData.tree?.sha || null;
-        }
-      }
-    }
-  }
-
   const blobs = await Promise.all(files.map(async ({ path, content }) => {
     const res = await fetch(`${base}/git/blobs`, {
       method: "POST",
@@ -82,15 +58,12 @@ export async function createInitialCommit(token, owner, repo, files, message = "
     return { path, sha: data.sha };
   }));
 
-  const treeBody = {
-    tree: blobs.map(({ path, sha }) => ({ path, mode: "100644", type: "blob", sha })),
-  };
-  if (baseTreeSha) treeBody.base_tree = baseTreeSha;
-
   const treeRes = await fetch(`${base}/git/trees`, {
     method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify(treeBody),
+    body: JSON.stringify({
+      tree: blobs.map(({ path, sha }) => ({ path, mode: "100644", type: "blob", sha })),
+    }),
   });
   if (!treeRes.ok) {
     const text = await treeRes.text();
@@ -98,13 +71,10 @@ export async function createInitialCommit(token, owner, repo, files, message = "
   }
   const tree = await treeRes.json();
 
-  const commitBody = { message, tree: tree.sha };
-  if (parentSha) commitBody.parents = [parentSha];
-
   const commitRes = await fetch(`${base}/git/commits`, {
     method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify(commitBody),
+    body: JSON.stringify({ message, tree: tree.sha }),
   });
   if (!commitRes.ok) {
     const text = await commitRes.text();
@@ -112,50 +82,58 @@ export async function createInitialCommit(token, owner, repo, files, message = "
   }
   const commit = await commitRes.json();
 
-  // 이미 브랜치가 존재하면 PATCH로 업데이트, 없으면 POST로 생성
-  const refUrl = `${base}/git/refs/heads/${defaultBranch}`;
-  const patchRes = await fetch(refUrl, {
-    method: "PATCH",
+  const refRes = await fetch(`${base}/git/refs`, {
+    method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({ sha: commit.sha, force: false }),
+    body: JSON.stringify({ ref: "refs/heads/main", sha: commit.sha }),
   });
-  if (!patchRes.ok) {
-    // PATCH 실패 시 새 ref 생성 시도
-    const postRes = await fetch(`${base}/git/refs`, {
-      method: "POST",
-      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: `refs/heads/${defaultBranch}`, sha: commit.sha }),
-    });
-    if (!postRes.ok && postRes.status !== 422) {
-      const text = await postRes.text();
-      throw new Error(`브랜치 생성 실패: ${postRes.status} ${text}`);
-    }
+  if (!refRes.ok && refRes.status !== 422) {
+    const text = await refRes.text();
+    throw new Error(`브랜치 생성 실패: ${refRes.status} ${text}`);
   }
-
   return commit;
 }
 
 export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, inputs) {
-  // 워크플로우가 활성화될 때까지 최대 30초 폴링
+  // 워크플로우가 활성화될 때까지 최대 60초 폴링
   const wfUrl = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + 60000;
+  let isActive = false;
   while (Date.now() < deadline) {
     const wfRes = await fetch(wfUrl, { headers: ghHeaders(token) });
     if (wfRes.ok) {
       const wf = await wfRes.json();
-      if (wf.state === "active") break;
+      if (wf.state === "active") {
+        isActive = true;
+        break;
+      }
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3000));
   }
 
+  if (!isActive) {
+    throw new Error(`워크플로우 활성화 대기 시간 초과 (${workflowFile}): GitHub가 워크플로우를 아직 인식하지 못했습니다.`);
+  }
+
+  // active 확인 후 추가 3초 대기 (GitHub 내부 전파 지연 대비)
+  await new Promise(r => setTimeout(r, 3000));
+
   const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({ ref: ref || "main", inputs: inputs || {} }),
-  });
-  if (!res.ok) {
+
+  // 422 발생 시 최대 3회 재시도 (각 5초 간격)
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ ref: ref || "main", inputs: inputs || {} }),
+    });
+    if (res.ok) return true;
     const text = await res.text();
+    if (res.status === 422 && attempt < 3) {
+      // 422: GitHub가 아직 dispatch를 받을 준비가 안 된 경우 — 재시도
+      await new Promise(r => setTimeout(r, 5000));
+      continue;
+    }
     throw new Error(`워크플로우 실행 실패 (${workflowFile}): ${res.status} ${text}`);
   }
   return true;
