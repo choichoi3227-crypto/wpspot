@@ -1,316 +1,400 @@
-name: wpspot nginx Keep-Alive
+name: wpspot Server Keep-Alive
 
 on:
   schedule:
-    # 5분마다 실행
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+# 구조: 5분마다 5개 job이 60초 간격으로 시작
+# 각 job: PHP 내장 서버(-S) + cloudflared Quick Tunnel → CF Worker 업데이트
+# nginx/FPM/systemctl 완전 없음 — 순수 서버리스
+
 jobs:
-  # ── 공통 setup 역할: WP/PLA 서버 복원 + IP 재등록 ──────────────────────
   keepalive-0:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      runner_ip: ${{ steps.ip.outputs.ip }}
+    timeout-minutes: 8
     steps:
-      - name: 체크아웃
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 런너 외부 IP 확인 (localhost 절대 금지)
-        id: ip
+      - name: PHP 설치
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, intl
+
+      - name: 설정 로드
+        id: cfg
         run: |
-          RUNNER_IP=""
-          for svc in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipecho.net/plain" "https://icanhazip.com"; do
-            RUNNER_IP=$(curl -sf --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]' || true)
-            if [[ "$RUNNER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "외부 IP: $RUNNER_IP"
-              break
-            fi
-            RUNNER_IP=""
+          if [ -f "deploy/server-config.json" ]; then
+            WP_PORT=$(python3  -c "import json; d=json.load(open('deploy/server-config.json')); print(d.get('wp_port',8888))")
+            PLA_PORT=$(python3 -c "import json; d=json.load(open('deploy/server-config.json')); print(d.get('pla_port',8889))")
+            WP_DIR=$(python3   -c "import json; d=json.load(open('deploy/server-config.json')); print(d.get('wordpress_dir','wordpress'))")
+            PLA_DIR=$(python3  -c "import json; d=json.load(open('deploy/server-config.json')); print(d.get('pla_dir','wordpress/wp-content/phpliteadmin'))")
+            WNAME=$(python3    -c "import json; d=json.load(open('deploy/server-config.json')); print(d.get('worker_name',''))")
+            PWNAME=$(python3   -c "import json; d=json.load(open('deploy/server-config.json')); print(d.get('pma_worker',''))")
+          else
+            WP_PORT=8888; PLA_PORT=8889
+            WP_DIR=wordpress
+            PLA_DIR=wordpress/wp-content/phpliteadmin
+            WNAME=""; PWNAME=""
+          fi
+          echo "WP_PORT=$WP_PORT"       >> $GITHUB_ENV
+          echo "PLA_PORT=$PLA_PORT"     >> $GITHUB_ENV
+          echo "WP_DIR=$WP_DIR"         >> $GITHUB_ENV
+          echo "PLA_DIR=$PLA_DIR"       >> $GITHUB_ENV
+          echo "WORKER_NAME=$WNAME"     >> $GITHUB_ENV
+          echo "PMA_WORKER=$PWNAME"     >> $GITHUB_ENV
+
+      - name: WordPress 라우터 생성
+        run: |
+          cat > /tmp/wp-router.php << 'ROUTEREOF'
+          <?php
+          $uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+          $file = __DIR__ . $uri;
+          if ($uri !== '/' && file_exists($file) && !is_dir($file)) {
+              return false;
+          }
+          if (file_exists(__DIR__ . '/wp-blog-header.php')) {
+              require __DIR__ . '/wp-blog-header.php';
+          } else {
+              http_response_code(503);
+              echo 'WordPress not found';
+          }
+          ROUTEREOF
+
+      - name: PHP 내장 서버 시작 (WordPress)
+        run: |
+          [ ! -d "$WP_DIR" ] && { echo "::warning::wordpress 디렉토리 없음 — 건너뜀"; exit 0; }
+          cd "$WP_DIR"
+          php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php \
+            -d display_errors=0 \
+            -d log_errors=1 \
+            >> /tmp/php-wp.log 2>&1 &
+          echo $! > /tmp/php-wp.pid
+          sleep 3
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 8 http://127.0.0.1:${WP_PORT}/ || echo "000")
+          echo "WP 서버 상태: $CODE"
+
+      - name: PHP 내장 서버 시작 (PHPLiteAdmin)
+        run: |
+          [ ! -d "$PLA_DIR" ] && { echo "::warning::PHPLiteAdmin 디렉토리 없음 — 건너뜀"; exit 0; }
+          cd "$PLA_DIR"
+          php -S 0.0.0.0:${PLA_PORT} \
+            -d display_errors=0 \
+            -d log_errors=1 \
+            >> /tmp/php-pla.log 2>&1 &
+          echo $! > /tmp/php-pla.pid
+          sleep 2
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 8 http://127.0.0.1:${PLA_PORT}/ || echo "000")
+          echo "PLA 서버 상태: $CODE"
+
+      - name: cloudflared 설치
+        run: |
+          curl -sSL \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" \
+            -o /tmp/cf.deb
+          dpkg -x /tmp/cf.deb /tmp/cf-pkg
+          sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
+
+      - name: cloudflared Quick Tunnel 시작
+        run: |
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} \
+            --no-autoupdate --logfile /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} \
+            --no-autoupdate --logfile /tmp/cf-pla.log 2>&1 &
+
+          # URL 추출
+          WP_URL=""; PLA_URL=""
+          for i in $(seq 1 30); do
+            sleep 1
+            [ -z "$WP_URL" ] && \
+              WP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-wp.log 2>/dev/null | head -1 || true)
+            [ -z "$PLA_URL" ] && \
+              PLA_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-pla.log 2>/dev/null | head -1 || true)
+            [ -n "$WP_URL" ] && [ -n "$PLA_URL" ] && break
           done
-          if [ -z "$RUNNER_IP" ]; then
-            echo "::error::외부 IP 확인 실패. localhost 사용 금지."
-            exit 1
-          fi
-          echo "ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
-          echo "RUNNER_EXTERNAL_IP=$RUNNER_IP" >> "$GITHUB_ENV"
+          echo "WP 터널:  ${WP_URL:-없음}"
+          echo "PLA 터널: ${PLA_URL:-없음}"
+          echo "TUNNEL_WP_URL=${WP_URL:-}"   >> $GITHUB_ENV
+          echo "TUNNEL_PLA_URL=${PLA_URL:-}" >> $GITHUB_ENV
 
-      - name: PHP 8.3 + nginx 설치
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 php8.3-mbstring \
-            php8.3-gd php8.3-zip php8.3-curl php8.3-xml php8.3-intl php8.3-opcache 2>/dev/null || true
-
-      - name: nginx + PHP-FPM 설정 복원 및 시작
-        run: |
-          # deploy/ 디렉터리에 저장된 설정 파일 복원
-          if [ -f deploy/nginx/wordpress.conf ]; then
-            sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf
-            sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          fi
-          if [ -f deploy/nginx/phpliteadmin.conf ]; then
-            sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf
-            sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          fi
-          sudo rm -f /etc/nginx/sites-enabled/default
-          if [ -f deploy/php-fpm/www.conf ]; then
-            sudo cp deploy/php-fpm/www.conf /etc/php/8.3/fpm/pool.d/www.conf
-          fi
-          # wordpress 파일 권한 복원
-          if [ -d wordpress ]; then
-            sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-            sudo chmod -R 755 wordpress/ 2>/dev/null || true
-            sudo chmod -R 770 wordpress/wp-content/ 2>/dev/null || true
-          fi
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "nginx + PHP-FPM 복원 완료: $(date)"
-
-      - name: Cloudflare Worker NGINX_ORIGIN 업데이트
+      - name: CF Worker 터널 URL 업데이트
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: |
-          RUNNER_IP="${{ steps.ip.outputs.ip }}"
-          CF_WORKER_NAME=$(basename "${{ secrets.CF_WORKER_URL || '' }}" ".workers.dev" 2>/dev/null || echo "")
-          if [ -z "$CF_WORKER_NAME" ]; then
-            echo "⚠ CF_WORKER_URL Secret 미설정 — Worker 변수 업데이트 건너뜀"
-            exit 0
+          [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && \
+            { echo "CF 자격증명 없음 — 건너뜀"; exit 0; }
+          [ -z "$TUNNEL_WP_URL" ] && { echo "터널 URL 없음 — 건너뜀"; exit 0; }
+          [ -z "$WORKER_NAME" ]   && { echo "Worker 이름 없음 — 건너뜀"; exit 0; }
+
+          npm install -g wrangler --quiet --no-progress 2>/dev/null
+
+          # WordPress Worker 업데이트
+          mkdir -p /tmp/cf-wp
+          cat > /tmp/cf-wp/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.NGINX_ORIGIN;
+              if (!origin) return new Response(offlinePage(), {
+                status: 503,
+                headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '30' }
+              });
+              const url = new URL(request.url);
+              const target = new URL(origin);
+              target.pathname = url.pathname;
+              target.search   = url.search;
+              const headers = new Headers(request.headers);
+              headers.set('host', new URL(origin).host);
+              headers.set('x-forwarded-proto', 'https');
+              headers.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
+              try {
+                const resp = await fetch(target.toString(), {
+                  method: request.method, headers,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                const out = new Headers(resp.headers);
+                out.set('x-powered-by', 'wpspot/serverless');
+                return new Response(resp.body, { status: resp.status, headers: out });
+              } catch (e) {
+                return new Response(offlinePage(e.message), {
+                  status: 503,
+                  headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '60' }
+                });
+              }
+            }
+          };
+          function offlinePage(m){return'<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">'
+          +'<meta http-equiv="refresh" content="30"><title>준비 중</title>'
+          +'<style>body{font-family:system-ui;display:flex;align-items:center;'
+          +'justify-content:center;min-height:100vh;margin:0;background:#f8fafc}'
+          +'.c{text-align:center;max-width:420px;padding:2rem}'
+          +'h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+          +'<body><div class="c"><h2>⏳ 서버 재시작 중이에요</h2>'
+          +'<p>잠시 후 자동으로 새로고침됩니다.</p>'
+          +(m?'<p style="color:#94a3b8;font-size:12px">'+m+'</p>':'')
+          +'</div></body></html>';}
+          WORKEREOF
+
+          cat > /tmp/cf-wp/wrangler.toml << TOMLEOF
+          name = "${WORKER_NAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          NGINX_ORIGIN = "${TUNNEL_WP_URL}"
+          TOMLEOF
+          cd /tmp/cf-wp && wrangler deploy --minify 2>/dev/null && echo "✓ WP Worker 업데이트" || echo "✗ WP Worker 업데이트 실패"
+
+          # PLA Worker 업데이트
+          if [ -n "$TUNNEL_PLA_URL" ] && [ -n "$PMA_WORKER" ]; then
+            mkdir -p /tmp/cf-pla
+            cat > /tmp/cf-pla/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.PLA_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 재시작 중', { status: 503 });
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                return new Response(r.body, { status: r.status, headers: r.headers });
+              } catch (e) {
+                return new Response('PHPLiteAdmin 오류: ' + e.message, { status: 503 });
+              }
+            }
+          };
+          WORKEREOF
+            cat > /tmp/cf-pla/wrangler.toml << TOMLEOF
+          name = "${PMA_WORKER}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          PLA_ORIGIN = "${TUNNEL_PLA_URL}"
+          TOMLEOF
+            cd /tmp/cf-pla && wrangler deploy --minify 2>/dev/null && echo "✓ PLA Worker 업데이트" || echo "✗ PLA Worker 업데이트 실패"
           fi
-          # Workers 환경변수 업데이트 (NGINX_ORIGIN = 새 런너 외부 IP)
-          UPDATE_RESULT=$(curl -sf -X PATCH \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${CF_WORKER_NAME}/settings" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"bindings\":[{\"type\":\"plain_text\",\"name\":\"NGINX_ORIGIN\",\"text\":\"http://${RUNNER_IP}\"}]}" \
-            2>/dev/null || echo "{}")
-          echo "WordPress Worker 업데이트: $UPDATE_RESULT"
-          # PMA Worker도 업데이트
-          PMA_WORKER_NAME="${CF_WORKER_NAME}-pma"
-          UPDATE_PMA=$(curl -sf -X PATCH \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${PMA_WORKER_NAME}/settings" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"bindings\":[{\"type\":\"plain_text\",\"name\":\"PLA_ORIGIN\",\"text\":\"http://${RUNNER_IP}:8080\"}]}" \
-            2>/dev/null || echo "{}")
-          echo "PHPLiteAdmin Worker 업데이트: $UPDATE_PMA"
 
-      - name: 외부 IP로 동작 확인 (localhost 금지)
+      - name: 서버 유지 (270초)
         run: |
-          RUNNER_IP="${{ steps.ip.outputs.ip }}"
-          sleep 2
-          WP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://${RUNNER_IP}/" || echo "000")
-          PLA_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://${RUNNER_IP}:8080/" || echo "000")
-          echo "WordPress  (http://${RUNNER_IP}/): HTTP ${WP_STATUS}"
-          echo "PHPLiteAdmin (http://${RUNNER_IP}:8080/): HTTP ${PLA_STATUS}"
-          echo "Keep-alive-0 완료: $(date)"
-          # 이 job이 종료되면 5분마다 재시작이 보장됨
-          # 나머지 job들이 20초 간격으로 오버랩하여 연속성 확보
-          sleep 250
+          echo "[0s] PHP 서버 + 터널 유지 중..."
+          sleep 90
+          # 헬스체크 + 자동 재시작
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:${WP_PORT}/ || echo "000")
+          if [ "$CODE" = "000" ]; then
+            echo "[90s] WP 서버 응답 없음 — 재시작"
+            cd "$WP_DIR" && php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php \
+              -d display_errors=0 >> /tmp/php-wp.log 2>&1 &
+          else
+            echo "[90s] WP 서버 OK ($CODE)"
+          fi
+          sleep 90
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:${WP_PORT}/ || echo "000")
+          echo "[180s] WP 서버: $CODE"
+          sleep 90
+          echo "[270s] keepalive job 완료"
 
+  # ── offset jobs ──────────────────────────────────────────────────────────
   keepalive-1:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
+      - name: Offset 60s
+        run: sleep 60
       - uses: actions/checkout@v4
-      - name: Keep-alive offset 20s
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+      - name: PHP 서버 + 터널
         run: |
-          sleep 20
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-1: $(date)"
-          sleep 230
+          CFG="deploy/server-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
+          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8889))" || echo 8889)
+          WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
+          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+
+          cat > /tmp/wp-router.php << 'EOF'
+          <?php
+          $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+          $f=__DIR__.$uri;
+          if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          EOF
+
+          [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
+          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S 0.0.0.0:${PLA_PORT} -d display_errors=0 >> /tmp/php-pla.log 2>&1 & cd -; }
+          sleep 3
+
+          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
+
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
+          sleep 210
+          echo "keepalive-1 완료"
 
   keepalive-2:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
+      - name: Offset 120s
+        run: sleep 120
       - uses: actions/checkout@v4
-      - name: Keep-alive offset 40s
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+      - name: PHP 서버 + 터널
         run: |
-          sleep 40
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-2: $(date)"
-          sleep 210
+          CFG="deploy/server-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
+          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8889))" || echo 8889)
+          WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
+          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+
+          cat > /tmp/wp-router.php << 'EOF'
+          <?php
+          $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+          $f=__DIR__.$uri;
+          if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          EOF
+
+          [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
+          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S 0.0.0.0:${PLA_PORT} -d display_errors=0 >> /tmp/php-pla.log 2>&1 & cd -; }
+          sleep 3
+
+          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
+
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
+          sleep 150
+          echo "keepalive-2 완료"
 
   keepalive-3:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
+      - name: Offset 180s
+        run: sleep 180
       - uses: actions/checkout@v4
-      - name: Keep-alive offset 60s
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+      - name: PHP 서버 + 터널
         run: |
-          sleep 60
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-3: $(date)"
-          sleep 190
+          CFG="deploy/server-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
+          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8889))" || echo 8889)
+          WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
+          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+
+          cat > /tmp/wp-router.php << 'EOF'
+          <?php
+          $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+          $f=__DIR__.$uri;
+          if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          EOF
+
+          [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
+          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S 0.0.0.0:${PLA_PORT} -d display_errors=0 >> /tmp/php-pla.log 2>&1 & cd -; }
+          sleep 3
+
+          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
+
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
+          sleep 90
+          echo "keepalive-3 완료"
 
   keepalive-4:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
+      - name: Offset 240s
+        run: sleep 240
       - uses: actions/checkout@v4
-      - name: Keep-alive offset 80s
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml
+      - name: PHP 서버 + 터널
         run: |
-          sleep 80
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-4: $(date)"
-          sleep 170
+          CFG="deploy/server-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
+          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8889))" || echo 8889)
+          WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
+          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
 
-  keepalive-5:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 100s
-        run: |
-          sleep 100
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-5: $(date)"
-          sleep 150
+          cat > /tmp/wp-router.php << 'EOF'
+          <?php
+          $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+          $f=__DIR__.$uri;
+          if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          EOF
 
-  keepalive-6:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 120s
-        run: |
-          sleep 120
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-6: $(date)"
-          sleep 130
+          [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
+          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S 0.0.0.0:${PLA_PORT} -d display_errors=0 >> /tmp/php-pla.log 2>&1 & cd -; }
+          sleep 3
 
-  keepalive-7:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 140s
-        run: |
-          sleep 140
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-7: $(date)"
-          sleep 110
+          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-  keepalive-8:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 160s
-        run: |
-          sleep 160
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-8: $(date)"
-          sleep 90
-
-  keepalive-9:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 180s
-        run: |
-          sleep 180
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-9: $(date)"
-          sleep 70
-
-  keepalive-10:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 200s
-        run: |
-          sleep 200
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-10: $(date)"
-          sleep 50
-
-  keepalive-11:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 220s
-        run: |
-          sleep 220
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-11: $(date)"
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
           sleep 30
-
-  keepalive-12:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Keep-alive offset 240s
-        run: |
-          sleep 240
-          sudo apt-get install -y -qq nginx php8.3-fpm php8.3-sqlite3 2>/dev/null || true
-          [ -f deploy/nginx/wordpress.conf ] && sudo cp deploy/nginx/wordpress.conf /etc/nginx/sites-available/wordpress.conf && sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
-          [ -f deploy/nginx/phpliteadmin.conf ] && sudo cp deploy/nginx/phpliteadmin.conf /etc/nginx/sites-available/phpliteadmin.conf && sudo ln -sf /etc/nginx/sites-available/phpliteadmin.conf /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          [ -d wordpress ] && sudo chown -R www-data:www-data wordpress/ 2>/dev/null || true
-          sudo nginx -t 2>/dev/null && sudo systemctl restart nginx || sudo systemctl start nginx
-          sudo systemctl restart php8.3-fpm || sudo systemctl start php8.3-fpm
-          echo "Keep-alive-12: $(date)"
-          sleep 10
+          echo "keepalive-4 완료"
