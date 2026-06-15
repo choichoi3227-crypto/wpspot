@@ -125,9 +125,21 @@ async function handleApi(request, env, url) {
 
     // site_credentials nginx_status 업데이트
     if (status === "active") {
-      await env.DB.prepare(
-        "UPDATE site_credentials SET nginx_status='active' WHERE site_id=?"
-      ).bind(siteId).run().catch(() => {});
+      // 행이 없으면 기본값으로 INSERT 후 UPDATE
+      const cred = await env.DB.prepare(
+        "SELECT site_id FROM site_credentials WHERE site_id=?"
+      ).bind(siteId).first().catch(() => null);
+      if (!cred) {
+        await env.DB.prepare(
+          `INSERT INTO site_credentials
+           (site_id, pla_username, pla_password_hash, db_path, nginx_status)
+           VALUES (?, 'admin', '', 'wp-content/database/wordpress.db', 'active')`
+        ).bind(siteId).run().catch(() => {});
+      } else {
+        await env.DB.prepare(
+          "UPDATE site_credentials SET nginx_status='active' WHERE site_id=?"
+        ).bind(siteId).run().catch(() => {});
+      }
     }
 
     return json({ ok: true });
