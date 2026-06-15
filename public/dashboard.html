@@ -285,7 +285,9 @@
       }
     }
 
-    // ── 사이트 목록 ───────────────────────────────────────────────────────
+    // ── 사이트 목록 + 폴링 ───────────────────────────────────────────────
+    let _pollTimer = null;
+
     async function loadSites() {
       const el = document.getElementById("siteList");
       try {
@@ -293,12 +295,38 @@
         const sites = data.sites || [];
         if (!sites.length) {
           el.innerHTML = `<div class="empty" style="padding:var(--space-8);">아직 사이트가 없어요.<br/>위에서 첫 사이트를 추가해보세요.</div>`;
+          stopPolling();
           return;
         }
         el.innerHTML = sites.map(renderSite).join("");
+
+        // 프로비저닝 중인 사이트가 있으면 10초마다 자동 갱신
+        if (sites.some(s => s.status === "provisioning")) {
+          startPolling();
+        } else {
+          stopPolling();
+        }
       } catch (e) {
         el.innerHTML = `<div class="empty" style="padding:var(--space-8);">${esc(e.message)}</div>`;
+        stopPolling();
       }
+    }
+
+    function startPolling() {
+      if (_pollTimer) return;
+      _pollTimer = setInterval(async () => {
+        const data = await wpspot.api("/api/sites").catch(() => null);
+        if (!data) return;
+        const sites = data.sites || [];
+        document.getElementById("siteList").innerHTML = sites.length
+          ? sites.map(renderSite).join("")
+          : `<div class="empty" style="padding:var(--space-8);">아직 사이트가 없어요.<br/>위에서 첫 사이트를 추가해보세요.</div>`;
+        if (!sites.some(s => s.status === "provisioning")) stopPolling();
+      }, 10000);
+    }
+
+    function stopPolling() {
+      if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
     }
 
     function renderSite(site) {
