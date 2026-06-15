@@ -17,6 +17,7 @@ function toBase64(str) {
   return btoa(bin);
 }
 
+// 레포 생성 후 default_branch 반환 (auto_init:true 필수)
 export async function createRepo(token, repoName) {
   const res = await fetch(`${GITHUB_API}/user/repos`, {
     method: "POST",
@@ -41,29 +42,29 @@ export async function getAuthenticatedUser(token) {
   return res.json();
 }
 
-// blob/tree API 대신 contents API로 파일을 순차 업로드
-// auto_init:true 로 생성된 레포에 안전하게 동작
-export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
-  const base = `${GITHUB_API}/repos/${owner}/${repo}`;
-
-  // 레포가 완전히 초기화될 때까지 대기 (default_branch 확인)
-  let defaultBranch = "main";
+// default_branch 확인 헬퍼
+export async function getDefaultBranch(token, owner, repo) {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     const r = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
     if (r.ok) {
       const info = await r.json();
-      if (info.default_branch) { defaultBranch = info.default_branch; break; }
+      if (info.default_branch) return info.default_branch;
     }
     await new Promise(r => setTimeout(r, 2000));
   }
+  return "main"; // fallback
+}
 
-  // 파일을 순차적으로 contents API로 업로드
+// blob/tree API 대신 contents API로 파일 순차 업로드 — default_branch 반환
+export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
+  const base = `${GITHUB_API}/repos/${owner}/${repo}`;
+  const defaultBranch = await getDefaultBranch(token, owner, repo);
+
   for (const { path, content } of files) {
     const encodedPath = path.split("/").map(p => encodeURIComponent(p)).join("/");
     const url = `${base}/contents/${encodedPath}`;
 
-    // 기존 파일 SHA 확인 (업데이트 시 필요)
     let sha;
     const getRes = await fetch(`${url}?ref=${defaultBranch}`, { headers: ghHeaders(token) });
     if (getRes.ok) sha = (await getRes.json()).sha;
@@ -86,49 +87,46 @@ export async function createInitialCommit(token, owner, repo, files, message = "
     }
   }
 
-  // 마지막으로 업로드된 커밋 SHA 반환
   const refRes = await fetch(`${base}/git/ref/heads/${defaultBranch}`, { headers: ghHeaders(token) });
   const refData = refRes.ok ? await refRes.json() : {};
-  return { sha: refData.object?.sha };
+  return { sha: refData.object?.sha, defaultBranch };
 }
 
 export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, inputs) {
-  // 워크플로우가 활성화될 때까지 최대 60초 폴링
   const wfUrl = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
-  const deadline = Date.now() + 60000;
+
+  // 워크플로우가 active 상태가 될 때까지 최대 90초 폴링
+  const deadline = Date.now() + 90000;
   let isActive = false;
   while (Date.now() < deadline) {
     const wfRes = await fetch(wfUrl, { headers: ghHeaders(token) });
     if (wfRes.ok) {
       const wf = await wfRes.json();
-      if (wf.state === "active") {
-        isActive = true;
-        break;
-      }
+      if (wf.state === "active") { isActive = true; break; }
     }
     await new Promise(r => setTimeout(r, 3000));
   }
 
   if (!isActive) {
-    throw new Error(`워크플로우 활성화 대기 시간 초과 (${workflowFile}): GitHub가 워크플로우를 아직 인식하지 못했습니다.`);
+    throw new Error(`워크플로우 활성화 대기 시간 초과 (${workflowFile})`);
   }
 
-  // active 확인 후 추가 3초 대기 (GitHub 내부 전파 지연 대비)
-  await new Promise(r => setTimeout(r, 3000));
+  // active 직후 바로 dispatch하면 422가 올 수 있으므로 5초 추가 대기
+  await new Promise(r => setTimeout(r, 5000));
 
   const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
 
-  // 422 발생 시 최대 3회 재시도 (각 5초 간격)
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // 422 발생 시 10초 간격 최대 5회 재시도
+  for (let attempt = 1; attempt <= 5; attempt++) {
     const res = await fetch(url, {
       method: "POST",
       headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: ref || "main", inputs: inputs || {} }),
+      body: JSON.stringify({ ref: ref, inputs: inputs || {} }),
     });
     if (res.ok) return true;
     const text = await res.text();
-    if (res.status === 422 && attempt < 3) {
-      await new Promise(r => setTimeout(r, 5000));
+    if (res.status === 422 && attempt < 5) {
+      await new Promise(r => setTimeout(r, 10000));
       continue;
     }
     throw new Error(`워크플로우 실행 실패 (${workflowFile}): ${res.status} ${text}`);
