@@ -255,7 +255,7 @@ jobs:
 
       # ── PHP 내장 서버 시작 (서버리스 방식) ──────────────────────────────
       # GitHub Actions runner에서 PHP -S 로 실행 = 서버 데몬 불필요
-      - name: PHP 내장 서버 시작 (WordPress: 포트 8888)
+      - name: "PHP 내장 서버 시작 (WordPress: 포트 8888)"
         run: |
           # PHP 내장 서버: nginx/Apache/FPM 완전 대체
           # WordPress 라우터 스크립트 생성 (퍼머링크 처리)
@@ -290,7 +290,7 @@ jobs:
           echo "WordPress PHP 내장 서버 HTTP: $HTTP_CODE"
           [ "$HTTP_CODE" != "000" ] && echo "PHP 내장 서버: OK" || { echo "::warning::PHP 서버 응답 없음"; cat /tmp/php-wp.log | tail -20; }
 
-      - name: PHP 내장 서버 시작 (PHPLiteAdmin: 포트 8889)
+      - name: "PHP 내장 서버 시작 (PHPLiteAdmin: 포트 8889)"
         run: |
           PLA_DIR="$(pwd)/wordpress/wp-content/phpliteadmin"
           cd "$PLA_DIR"
