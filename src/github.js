@@ -119,45 +119,50 @@ export async function createInitialCommit(token, owner, repo, files, message = "
 }
 
 export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, inputs) {
-  const wfUrl = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
+  const wfUrl       = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}`;
+  const dispatchUrl = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
 
-  // 워크플로우가 active 상태가 될 때까지 최대 90초 폴링
-  const deadline = Date.now() + 90000;
-  let isActive = false;
+  // 최대 120초: state=active 확인 + dispatch 422 모두 루프 안에서 재시도
+  // GitHub은 커밋 직후 workflow_dispatch 트리거를 비동기로 파싱하므로
+  // state=active여도 422가 올 수 있음 — 성공할 때까지 반복
+  const deadline = Date.now() + 120000;
+  let lastError  = "";
+
   while (Date.now() < deadline) {
+    // 1) 워크플로우 존재 & active 확인
     const wfRes = await fetch(wfUrl, { headers: ghHeaders(token) });
-    if (wfRes.ok) {
-      const wf = await wfRes.json();
-      if (wf.state === "active") { isActive = true; break; }
-    }
-    await new Promise(r => setTimeout(r, 3000));
-  }
-
-  if (!isActive) {
-    throw new Error(`워크플로우 활성화 대기 시간 초과 (${workflowFile})`);
-  }
-
-  // active 직후 바로 dispatch하면 422가 올 수 있으므로 5초 추가 대기
-  await new Promise(r => setTimeout(r, 5000));
-
-  const url = `${GITHUB_API}/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
-
-  // 422 발생 시 10초 간격 최대 5회 재시도
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: ref, inputs: inputs || {} }),
-    });
-    if (res.ok) return true;
-    const text = await res.text();
-    if (res.status === 422 && attempt < 5) {
-      await new Promise(r => setTimeout(r, 10000));
+    if (!wfRes.ok) {
+      await new Promise(r => setTimeout(r, 5000));
       continue;
     }
-    throw new Error(`워크플로우 실행 실패 (${workflowFile}): ${res.status} ${text}`);
+    const wf = await wfRes.json();
+    if (wf.state !== "active") {
+      await new Promise(r => setTimeout(r, 5000));
+      continue;
+    }
+
+    // 2) dispatch 시도
+    const res = await fetch(dispatchUrl, {
+      method: "POST",
+      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ ref, inputs: inputs || {} }),
+    });
+    if (res.ok) return true;
+
+    const text = await res.text();
+    lastError  = `${res.status} ${text}`;
+
+    // 422 = workflow_dispatch 트리거 아직 미준비 — 재시도
+    if (res.status === 422) {
+      await new Promise(r => setTimeout(r, 8000));
+      continue;
+    }
+
+    // 그 외(401, 404 등)는 재시도 불필요
+    throw new Error(`워크플로우 실행 실패 (${workflowFile}): ${lastError}`);
   }
-  return true;
+
+  throw new Error(`워크플로우 dispatch 타임아웃 (${workflowFile}): ${lastError}`);
 }
 
 export async function getContents(token, owner, repo, path = "") {
