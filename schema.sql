@@ -1,4 +1,4 @@
--- wpspot D1 schema v3 — 블로그스팟 제거, 실제 WP 호스팅
+-- wpspot D1 schema v4
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -8,37 +8,34 @@ CREATE TABLE IF NOT EXISTS users (
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 
--- 사용자 API 키/토큰 (AES-256-GCM 암호화 저장)
 CREATE TABLE IF NOT EXISTS user_credentials (
   user_id TEXT PRIMARY KEY,
-  github_token_enc TEXT,           -- GitHub Personal Access Token
-  cf_global_api_key_enc TEXT,      -- Cloudflare Global API Key
-  cf_api_token_enc TEXT,           -- Cloudflare API Token (Workers 배포용)
-  cf_account_email TEXT,           -- Cloudflare 계정 이메일
-  cf_account_id TEXT,              -- Cloudflare Account ID
+  github_token_enc TEXT,
+  cf_global_api_key_enc TEXT,
+  cf_api_token_enc TEXT,
+  cf_account_email TEXT,
+  cf_account_id TEXT,
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- 사용자가 생성한 사이트
 CREATE TABLE IF NOT EXISTS sites (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   site_name TEXT NOT NULL,
   site_slug TEXT NOT NULL,
-  github_repo TEXT,                -- owner/repo
+  github_repo TEXT,
   cf_worker_name TEXT,
-  cf_worker_url TEXT,              -- workers.dev URL
-  pma_worker_url TEXT,             -- PHPLiteAdmin Worker URL (wpspot-slug-pma.workers.dev)
-  cf_zone_id TEXT,                 -- 연결된 Cloudflare Zone ID
-  custom_domain TEXT,              -- 사용자 개인 도메인 (예: example.com)
+  cf_worker_url TEXT,
+  tunnel_pla_url TEXT,
+  cf_zone_id TEXT,
+  custom_domain TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- 프로비저닝/작업 로그
 CREATE TABLE IF NOT EXISTS site_jobs (
   id TEXT PRIMARY KEY,
   site_id TEXT NOT NULL,
@@ -50,24 +47,19 @@ CREATE TABLE IF NOT EXISTS site_jobs (
   FOREIGN KEY (site_id) REFERENCES sites(id)
 );
 
--- 호스팅 접속 정보
 CREATE TABLE IF NOT EXISTS site_credentials (
   site_id TEXT PRIMARY KEY,
-  -- PHPLiteAdmin 접속 정보
   pla_username TEXT NOT NULL DEFAULT 'admin',
-  pla_password_hash TEXT NOT NULL,
+  pla_password_hash TEXT NOT NULL DEFAULT '',
   pla_password_plain_enc TEXT,
-  -- WordPress 관리자 정보
   wp_admin_username TEXT,
   wp_admin_password_plain_enc TEXT,
-  -- 기타
   db_path TEXT NOT NULL DEFAULT 'wp-content/database/wordpress.db',
   nginx_status TEXT NOT NULL DEFAULT 'not_provisioned',
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   FOREIGN KEY (site_id) REFERENCES sites(id)
 );
 
--- PHPLiteAdmin 일일 접속 난수 토큰 (매일 자정 초기화)
 CREATE TABLE IF NOT EXISTS pla_tokens (
   id TEXT PRIMARY KEY,
   site_id TEXT NOT NULL,
@@ -77,20 +69,18 @@ CREATE TABLE IF NOT EXISTS pla_tokens (
   FOREIGN KEY (site_id) REFERENCES sites(id)
 );
 
--- 사용자 도메인 목록 (Cloudflare Zone 기반)
 CREATE TABLE IF NOT EXISTS site_domains (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   domain_name TEXT NOT NULL,
   cf_zone_id TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL DEFAULT 'pending',   -- pending, active, error
-  name_servers TEXT,                         -- JSON array
+  status TEXT NOT NULL DEFAULT 'pending',
+  name_servers TEXT,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- ── WordPress 데이터 (D1에 저장, PHPLiteAdmin으로 관리) ──────────────────
-
+-- WordPress 데이터 테이블 (D1 저장, PHPLiteAdmin으로 관리)
 CREATE TABLE IF NOT EXISTS wp_options (
   option_id INTEGER PRIMARY KEY AUTOINCREMENT,
   site_id TEXT NOT NULL,
@@ -106,7 +96,7 @@ CREATE TABLE IF NOT EXISTS wp_users (
   site_id TEXT NOT NULL,
   user_login TEXT NOT NULL,
   user_pass TEXT NOT NULL,
-  user_nicename TEXT NOT NULL,
+  user_nicename TEXT NOT NULL DEFAULT '',
   user_email TEXT NOT NULL DEFAULT '',
   user_url TEXT NOT NULL DEFAULT '',
   user_registered TEXT NOT NULL DEFAULT '',
@@ -238,12 +228,15 @@ CREATE TABLE IF NOT EXISTS wp_links (
   FOREIGN KEY (site_id) REFERENCES sites(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_sites_user       ON sites(user_id);
-CREATE INDEX IF NOT EXISTS idx_sites_slug       ON sites(site_slug);
-CREATE INDEX IF NOT EXISTS idx_jobs_site        ON site_jobs(site_id);
-CREATE INDEX IF NOT EXISTS idx_pla_token        ON pla_tokens(token);
-CREATE INDEX IF NOT EXISTS idx_pla_site         ON pla_tokens(site_id);
-CREATE INDEX IF NOT EXISTS idx_domains_user     ON site_domains(user_id);
-CREATE INDEX IF NOT EXISTS idx_wp_options_site  ON wp_options(site_id);
-CREATE INDEX IF NOT EXISTS idx_wp_posts_site    ON wp_posts(site_id);
-CREATE INDEX IF NOT EXISTS idx_wp_users_site    ON wp_users(site_id);
+-- 인덱스
+CREATE INDEX IF NOT EXISTS idx_sites_user        ON sites(user_id);
+CREATE INDEX IF NOT EXISTS idx_sites_slug        ON sites(site_slug);
+CREATE INDEX IF NOT EXISTS idx_jobs_site         ON site_jobs(site_id);
+CREATE INDEX IF NOT EXISTS idx_pla_token         ON pla_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_pla_site          ON pla_tokens(site_id);
+CREATE INDEX IF NOT EXISTS idx_domains_user      ON site_domains(user_id);
+CREATE INDEX IF NOT EXISTS idx_wp_options_site   ON wp_options(site_id);
+CREATE INDEX IF NOT EXISTS idx_wp_posts_site     ON wp_posts(site_id);
+CREATE INDEX IF NOT EXISTS idx_wp_users_site     ON wp_users(site_id);
+CREATE INDEX IF NOT EXISTS idx_wp_postmeta_site  ON wp_postmeta(site_id);
+CREATE INDEX IF NOT EXISTS idx_wp_comments_site  ON wp_comments(site_id);
