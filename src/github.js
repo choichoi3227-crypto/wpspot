@@ -17,7 +17,7 @@ function toBase64(str) {
   return btoa(bin);
 }
 
-// 레포 생성 후 default_branch 반환 (auto_init:true 필수)
+// 레포 생성 후 초기 커밋(auto_init README)이 실제로 존재할 때까지 폴링
 export async function createRepo(token, repoName) {
   const res = await fetch(`${GITHUB_API}/user/repos`, {
     method: "POST",
@@ -33,7 +33,26 @@ export async function createRepo(token, repoName) {
     const text = await res.text();
     throw new Error(`GitHub 레포 생성 실패: ${res.status} ${text}`);
   }
-  return res.json().catch(() => ({}));
+  const repoData = await res.json().catch(() => ({}));
+  const owner = repoData.owner?.login;
+  const repo  = repoData.name || repoName;
+
+  // auto_init 커밋이 실제로 생성될 때까지 최대 30초 폴링
+  if (owner) {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      const r = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/commits`, {
+        headers: ghHeaders(token),
+      });
+      if (r.ok) {
+        const commits = await r.json().catch(() => []);
+        if (Array.isArray(commits) && commits.length > 0) break; // 초기 커밋 확인
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  return repoData;
 }
 
 export async function getAuthenticatedUser(token) {
@@ -42,18 +61,25 @@ export async function getAuthenticatedUser(token) {
   return res.json();
 }
 
-// default_branch 확인 헬퍼
+// default_branch 확인 헬퍼 — 브랜치에 실제 커밋이 있을 때만 반환
 export async function getDefaultBranch(token, owner, repo) {
   const deadline = Date.now() + 30000;
+  let defaultBranch = "main";
   while (Date.now() < deadline) {
     const r = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
     if (r.ok) {
       const info = await r.json();
-      if (info.default_branch) return info.default_branch;
+      if (info.default_branch) defaultBranch = info.default_branch;
+      // 브랜치 ref가 실제로 존재하는지(= 커밋이 있는지) 확인
+      const refRes = await fetch(
+        `${GITHUB_API}/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`,
+        { headers: ghHeaders(token) }
+      );
+      if (refRes.ok) return defaultBranch; // ref 존재 = 커밋 있음
     }
     await new Promise(r => setTimeout(r, 2000));
   }
-  return "main"; // fallback
+  return defaultBranch;
 }
 
 // blob/tree API 대신 contents API로 파일 순차 업로드 — default_branch 반환
