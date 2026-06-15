@@ -3,41 +3,37 @@ main = "src/worker.js"
 compatibility_date = "2026-05-16"
 
 [observability]
-enabled = false
-head_sampling_rate = 1
+enabled = true
 
 [observability.logs]
 enabled = true
-head_sampling_rate = 1
-persist = true
 invocation_logs = true
 
-[observability.traces]
-enabled = false
-persist = true
-head_sampling_rate = 1
-
-
-# 정적 파일(public/) 서빙
+# 정적 파일 서빙 (public/)
 [assets]
 directory = "./public"
 binding = "ASSETS"
 
-# Cloudflare D1 (사용자, 사이트, 자격증명 메타데이터)
+# Cloudflare D1
 [[d1_databases]]
 binding = "DB"
 database_name = "wpspot-db"
 database_id = "0ca2a71d-d98c-4f82-aaea-2d70fd294750"
 
-# Cloudflare KV (세션/캐시/레이트리밋)
+# Cloudflare KV (세션/캐시용, 향후 확장)
 [[kv_namespaces]]
 binding = "KV"
 id = "13f767b4020e438db9a7ee5ea320801c"
 
-# JWT 서명용 시크릿 (wrangler secret put JWT_SECRET)
-# 자격증명 암호화용 시크릿 (wrangler secret put CRED_ENC_KEY)
-# 둘 다 `wrangler secret put` 명령으로 별도 등록 (wrangler.toml에 평문 작성 금지)
+# Secrets — wrangler secret put 으로 등록 (절대 이 파일에 평문 작성 금지)
+# wrangler secret put JWT_SECRET       → 랜덤 64자 문자열
+# wrangler secret put CRED_ENC_KEY     → base64 인코딩된 32바이트 (openssl rand -base64 32)
 
 [vars]
 APP_NAME = "wpspot"
-APP_ENV = "production"
+APP_ENV  = "production"
+
+# Worker 자신의 공개 URL (콜백 URL 생성용)
+# 배포 후 실제 URL로 업데이트: wrangler.toml 또는 wrangler secret put
+# 기본값: workers.dev URL 자동 사용
+WPSPOT_BASE_URL = "https://cloud-press.co.kr"
