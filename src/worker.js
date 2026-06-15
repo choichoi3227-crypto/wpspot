@@ -340,9 +340,6 @@ async function handleApi(request, env, url) {
         { path: "deploy/.worker_name",                   content: workerName },
       ], "chore: initial wpspot setup");
 
-      // 10초 대기 후 워크플로우 dispatch
-      await new Promise(r => setTimeout(r, 10000));
-
       await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", "main", {
         site_slug:             site.site_slug,
         site_display_name:     site.site_name,
