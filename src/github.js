@@ -24,7 +24,7 @@ export async function createRepo(token, repoName) {
     body: JSON.stringify({
       name: repoName,
       private: true,
-      auto_init: false,
+      auto_init: true,
       description: "wpspot — WordPress hosting (nginx + PHP-FPM + SQLite)",
     }),
   });
@@ -44,6 +44,30 @@ export async function getAuthenticatedUser(token) {
 export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
   const base = `${GITHUB_API}/repos/${owner}/${repo}`;
 
+  // 레포의 기본 브랜치(main 또는 master) HEAD SHA를 가져옴
+  // auto_init:true 로 생성된 레포는 초기 커밋이 존재하므로 base_tree로 사용
+  let parentSha = null;
+  let baseTreeSha = null;
+  let defaultBranch = "main";
+
+  const repoInfoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
+  if (repoInfoRes.ok) {
+    const repoInfo = await repoInfoRes.json();
+    defaultBranch = repoInfo.default_branch || "main";
+    const refRes = await fetch(`${base}/git/ref/heads/${defaultBranch}`, { headers: ghHeaders(token) });
+    if (refRes.ok) {
+      const refData = await refRes.json();
+      parentSha = refData.object?.sha || null;
+      if (parentSha) {
+        const commitRes = await fetch(`${base}/git/commits/${parentSha}`, { headers: ghHeaders(token) });
+        if (commitRes.ok) {
+          const commitData = await commitRes.json();
+          baseTreeSha = commitData.tree?.sha || null;
+        }
+      }
+    }
+  }
+
   const blobs = await Promise.all(files.map(async ({ path, content }) => {
     const res = await fetch(`${base}/git/blobs`, {
       method: "POST",
@@ -58,12 +82,15 @@ export async function createInitialCommit(token, owner, repo, files, message = "
     return { path, sha: data.sha };
   }));
 
+  const treeBody = {
+    tree: blobs.map(({ path, sha }) => ({ path, mode: "100644", type: "blob", sha })),
+  };
+  if (baseTreeSha) treeBody.base_tree = baseTreeSha;
+
   const treeRes = await fetch(`${base}/git/trees`, {
     method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({
-      tree: blobs.map(({ path, sha }) => ({ path, mode: "100644", type: "blob", sha })),
-    }),
+    body: JSON.stringify(treeBody),
   });
   if (!treeRes.ok) {
     const text = await treeRes.text();
@@ -71,10 +98,13 @@ export async function createInitialCommit(token, owner, repo, files, message = "
   }
   const tree = await treeRes.json();
 
+  const commitBody = { message, tree: tree.sha };
+  if (parentSha) commitBody.parents = [parentSha];
+
   const commitRes = await fetch(`${base}/git/commits`, {
     method: "POST",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({ message, tree: tree.sha }),
+    body: JSON.stringify(commitBody),
   });
   if (!commitRes.ok) {
     const text = await commitRes.text();
@@ -82,15 +112,26 @@ export async function createInitialCommit(token, owner, repo, files, message = "
   }
   const commit = await commitRes.json();
 
-  const refRes = await fetch(`${base}/git/refs`, {
-    method: "POST",
+  // 이미 브랜치가 존재하면 PATCH로 업데이트, 없으면 POST로 생성
+  const refUrl = `${base}/git/refs/heads/${defaultBranch}`;
+  const patchRes = await fetch(refUrl, {
+    method: "PATCH",
     headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({ ref: "refs/heads/main", sha: commit.sha }),
+    body: JSON.stringify({ sha: commit.sha, force: false }),
   });
-  if (!refRes.ok && refRes.status !== 422) {
-    const text = await refRes.text();
-    throw new Error(`브랜치 생성 실패: ${refRes.status} ${text}`);
+  if (!patchRes.ok) {
+    // PATCH 실패 시 새 ref 생성 시도
+    const postRes = await fetch(`${base}/git/refs`, {
+      method: "POST",
+      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ ref: `refs/heads/${defaultBranch}`, sha: commit.sha }),
+    });
+    if (!postRes.ok && postRes.status !== 422) {
+      const text = await postRes.text();
+      throw new Error(`브랜치 생성 실패: ${postRes.status} ${text}`);
+    }
   }
+
   return commit;
 }
 
