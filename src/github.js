@@ -24,7 +24,7 @@ export async function createRepo(token, repoName) {
     body: JSON.stringify({
       name: repoName,
       private: true,
-      auto_init: false,
+      auto_init: true,
       description: "wpspot — WordPress hosting (nginx + PHP-FPM + SQLite)",
     }),
   });
@@ -41,57 +41,55 @@ export async function getAuthenticatedUser(token) {
   return res.json();
 }
 
+// blob/tree API 대신 contents API로 파일을 순차 업로드
+// auto_init:true 로 생성된 레포에 안전하게 동작
 export async function createInitialCommit(token, owner, repo, files, message = "chore: initial commit") {
   const base = `${GITHUB_API}/repos/${owner}/${repo}`;
 
-  const blobs = await Promise.all(files.map(async ({ path, content }) => {
-    const res = await fetch(`${base}/git/blobs`, {
-      method: "POST",
+  // 레포가 완전히 초기화될 때까지 대기 (default_branch 확인)
+  let defaultBranch = "main";
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const r = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
+    if (r.ok) {
+      const info = await r.json();
+      if (info.default_branch) { defaultBranch = info.default_branch; break; }
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  // 파일을 순차적으로 contents API로 업로드
+  for (const { path, content } of files) {
+    const encodedPath = path.split("/").map(p => encodeURIComponent(p)).join("/");
+    const url = `${base}/contents/${encodedPath}`;
+
+    // 기존 파일 SHA 확인 (업데이트 시 필요)
+    let sha;
+    const getRes = await fetch(`${url}?ref=${defaultBranch}`, { headers: ghHeaders(token) });
+    if (getRes.ok) sha = (await getRes.json()).sha;
+
+    const body = {
+      message: `${message} — ${path}`,
+      content: toBase64(content),
+      branch: defaultBranch,
+    };
+    if (sha) body.sha = sha;
+
+    const res = await fetch(url, {
+      method: "PUT",
       headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-      body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`blob 생성 실패 (${path}): ${res.status} ${text}`);
+      throw new Error(`파일 업로드 실패 (${path}): ${res.status} ${text}`);
     }
-    const data = await res.json();
-    return { path, sha: data.sha };
-  }));
-
-  const treeRes = await fetch(`${base}/git/trees`, {
-    method: "POST",
-    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({
-      tree: blobs.map(({ path, sha }) => ({ path, mode: "100644", type: "blob", sha })),
-    }),
-  });
-  if (!treeRes.ok) {
-    const text = await treeRes.text();
-    throw new Error(`tree 생성 실패: ${treeRes.status} ${text}`);
   }
-  const tree = await treeRes.json();
 
-  const commitRes = await fetch(`${base}/git/commits`, {
-    method: "POST",
-    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({ message, tree: tree.sha }),
-  });
-  if (!commitRes.ok) {
-    const text = await commitRes.text();
-    throw new Error(`커밋 생성 실패: ${commitRes.status} ${text}`);
-  }
-  const commit = await commitRes.json();
-
-  const refRes = await fetch(`${base}/git/refs`, {
-    method: "POST",
-    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify({ ref: "refs/heads/main", sha: commit.sha }),
-  });
-  if (!refRes.ok && refRes.status !== 422) {
-    const text = await refRes.text();
-    throw new Error(`브랜치 생성 실패: ${refRes.status} ${text}`);
-  }
-  return commit;
+  // 마지막으로 업로드된 커밋 SHA 반환
+  const refRes = await fetch(`${base}/git/ref/heads/${defaultBranch}`, { headers: ghHeaders(token) });
+  const refData = refRes.ok ? await refRes.json() : {};
+  return { sha: refData.object?.sha };
 }
 
 export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, inputs) {
@@ -130,7 +128,6 @@ export async function dispatchWorkflow(token, owner, repo, workflowFile, ref, in
     if (res.ok) return true;
     const text = await res.text();
     if (res.status === 422 && attempt < 3) {
-      // 422: GitHub가 아직 dispatch를 받을 준비가 안 된 경우 — 재시도
       await new Promise(r => setTimeout(r, 5000));
       continue;
     }
