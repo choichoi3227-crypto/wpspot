@@ -80,6 +80,20 @@ CREATE TABLE IF NOT EXISTS site_domains (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- 사이트 ↔ 도메인 매핑 (Cloudways 스타일 Primary/Alias 멀티 도메인)
+CREATE TABLE IF NOT EXISTS site_domain_bindings (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  cf_zone_id TEXT NOT NULL,
+  hostname TEXT NOT NULL,              -- 예: example.com, www.example.com, blog.example.com
+  role TEXT NOT NULL DEFAULT 'alias',  -- 'primary' | 'alias'
+  redirect_to_primary INTEGER NOT NULL DEFAULT 0,  -- alias를 primary로 301 리다이렉트할지
+  status TEXT NOT NULL DEFAULT 'pending', -- pending | active | error
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  UNIQUE(hostname),
+  FOREIGN KEY (site_id) REFERENCES sites(id)
+);
+
 -- WordPress 데이터 테이블 (D1 저장, PHPLiteAdmin으로 관리)
 CREATE TABLE IF NOT EXISTS wp_options (
   option_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,6 +249,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_site         ON site_jobs(site_id);
 CREATE INDEX IF NOT EXISTS idx_pla_token         ON pla_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_pla_site          ON pla_tokens(site_id);
 CREATE INDEX IF NOT EXISTS idx_domains_user      ON site_domains(user_id);
+CREATE INDEX IF NOT EXISTS idx_bindings_site      ON site_domain_bindings(site_id);
+CREATE INDEX IF NOT EXISTS idx_bindings_hostname  ON site_domain_bindings(hostname);
 CREATE INDEX IF NOT EXISTS idx_wp_options_site   ON wp_options(site_id);
 CREATE INDEX IF NOT EXISTS idx_wp_posts_site     ON wp_posts(site_id);
 CREATE INDEX IF NOT EXISTS idx_wp_users_site     ON wp_users(site_id);
