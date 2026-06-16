@@ -88,7 +88,7 @@
             </div>
           </div>
           <div class="field">
-            <label class="field__label">API Token <span style="font-weight:400;color:var(--text-secondary);">(Workers 배포용, 선택)</span></label>
+            <label class="field__label">API Token <span style="font-weight:400;color:var(--text-danger);">(Workers 배포에 필수)</span></label>
             <div class="cred-row">
               <div class="cred-masked" id="cfApiTokenMasked">••••••••</div>
               <div class="cred-edit-wrap" id="cfApiTokenEditWrap">
@@ -96,7 +96,9 @@
               </div>
               <button class="btn btn--secondary btn--s" id="cfApiTokenEditBtn" onclick="toggleEdit('cfApiToken')">수정하기</button>
             </div>
-            <div class="field__help">Workers & Pages:Edit 권한이 있는 Custom Token. 없으면 Worker 자동 배포가 생략돼요.</div>
+            <div class="field__help">Workers Scripts:Edit 권한이 있는 Custom Token. 사이트 워커와 PHPLiteAdmin 워커 배포에 필요해요(없으면 프로비저닝이 실패해요).<br/>
+              <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" style="color:var(--text-brand);">Cloudflare에서 생성하기 ↗</a>
+            </div>
           </div>
           <div class="field">
             <label class="field__label">Account ID <span style="font-weight:400;color:var(--text-secondary);">(자동 감지)</span></label>
@@ -136,7 +138,7 @@
               <tr><td style="padding:8px 4px;">GitHub PAT (repo+workflow)</td><td style="padding:8px 4px;">레포 생성 · 파일 관리 · Actions 실행</td><td style="padding:8px 4px;color:#10b981;">필수</td></tr>
               <tr><td style="padding:8px 4px;">CF 계정 이메일</td><td style="padding:8px 4px;">Cloudflare API 인증</td><td style="padding:8px 4px;color:#10b981;">필수</td></tr>
               <tr><td style="padding:8px 4px;">CF Global API Key</td><td style="padding:8px 4px;">Zone · DNS · Worker Route 관리</td><td style="padding:8px 4px;color:#10b981;">필수</td></tr>
-              <tr><td style="padding:8px 4px;">CF API Token</td><td style="padding:8px 4px;">Wrangler를 통한 Worker 자동 배포</td><td style="padding:8px 4px;color:#f59e0b;">선택</td></tr>
+              <tr><td style="padding:8px 4px;">CF API Token</td><td style="padding:8px 4px;">Wrangler를 통한 Worker 자동 배포</td><td style="padding:8px 4px;color:#10b981;">필수</td></tr>
               <tr><td style="padding:8px 4px;">CF Account ID</td><td style="padding:8px 4px;">Worker/Zone 생성 대상 계정</td><td style="padding:8px 4px;color:#94a3b8;">자동감지</td></tr>
             </tbody>
           </table>
@@ -147,6 +149,7 @@
 
   <script src="/js/app.js"></script>
   <script>
+    wpspot.renderShell("account", "내 계정");
     let editState = {};
 
     if (wpspot.requireAuth()) loadCredentials();
