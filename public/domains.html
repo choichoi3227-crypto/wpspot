@@ -135,6 +135,7 @@
 
   <script src="/js/app.js"></script>
   <script>
+    wpspot.renderShell("domains", "도메인 관리");
     let zones = [];
     let sites = [];
     let selectedZone = null;
@@ -232,9 +233,9 @@
     async function connectSite(siteId, zoneName) {
       try {
         const zone = selectedZone;
-        await wpspot.api(`/api/sites/${siteId}/connect-domain`, {
+        await wpspot.api(`/api/sites/${siteId}/domains`, {
           method: "POST",
-          body: JSON.stringify({ customDomain: zone.name, zoneId: zone.id }),
+          body: JSON.stringify({ hostname: zone.name, zoneId: zone.id }),
         });
         wpspot.toast(`${zoneName} 도메인이 연결됐어요.`);
         closeModal("connectModal");
