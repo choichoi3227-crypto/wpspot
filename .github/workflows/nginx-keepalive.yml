@@ -277,9 +277,112 @@ jobs:
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
-          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
-          sleep 210
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate --logfile /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate --logfile /tmp/cf-pla.log 2>&1 &
+
+          WP_URL=""; PLA_URL=""
+          for i in $(seq 1 20); do
+            sleep 1
+            [ -z "$WP_URL" ] && WP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-wp.log 2>/dev/null | head -1 || true)
+            [ -z "$PLA_URL" ] && PLA_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-pla.log 2>/dev/null | head -1 || true)
+            [ -n "$WP_URL" ] && [ -n "$PLA_URL" ] && break
+          done
+          echo "WP_URL=$WP_URL"   >> $GITHUB_ENV
+          echo "PLA_URL=$PLA_URL" >> $GITHUB_ENV
+          echo "keepalive-1 터널 준비 완료: WP=$WP_URL PLA=$PLA_URL"
+
+      - name: CF Worker 갱신 (keepalive-1)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && { echo "CF 자격증명 없음 — 건너뜀"; exit 0; }
+          CFG="deploy/server-config.json"
+          WNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('worker_name',''))" || echo "")
+          PWNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_worker',''))" || echo "")
+          [ -z "$WNAME" ] && { echo "Worker 이름 없음 — 건너뜀"; exit 0; }
+          [ -z "$WP_URL" ] && { echo "터널 URL 없음 — 건너뜀"; exit 0; }
+
+          npm install -g wrangler --quiet --no-progress 2>/dev/null
+
+          mkdir -p /tmp/cf-wp-keepalive-1
+          cat > /tmp/cf-wp-keepalive-1/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.NGINX_ORIGIN;
+              if (!origin) return new Response(offlinePage(), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '30' } });
+              const url = new URL(request.url);
+              const target = new URL(origin);
+              target.pathname = url.pathname; target.search = url.search;
+              const headers = new Headers(request.headers);
+              headers.set('host', new URL(origin).host);
+              headers.set('x-forwarded-proto', 'https');
+              try {
+                const resp = await fetch(target.toString(), {
+                  method: request.method, headers,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                const out = new Headers(resp.headers);
+                out.set('x-powered-by', 'wpspot/serverless');
+                return new Response(resp.body, { status: resp.status, headers: out });
+              } catch (e) {
+                return new Response(offlinePage(e.message), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '60' } });
+              }
+            }
+          };
+          function offlinePage(m){return'<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">'
+          +'<meta http-equiv="refresh" content="30"><title>준비 중</title>'
+          +'<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}.c{text-align:center;max-width:420px;padding:2rem}h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+          +'<body><div class="c"><h2>⏳ 서버 재시작 중이에요</h2><p>잠시 후 자동으로 새로고침됩니다.</p>'
+          +(m?'<p style="color:#94a3b8;font-size:12px">'+m+'</p>':'')
+          +'</div></body></html>';}
+          WORKEREOF
+          cat > /tmp/cf-wp-keepalive-1/wrangler.toml << TOMLEOF
+          name = "${WNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          NGINX_ORIGIN = "${WP_URL}"
+          TOMLEOF
+          cd /tmp/cf-wp-keepalive-1 && wrangler deploy --minify 2>/dev/null && echo "✓ WP Worker 업데이트 (keepalive-1)" || echo "✗ WP Worker 업데이트 실패 (keepalive-1)"
+
+          PLA_URL="${PLA_URL:-}"
+          if [ -n "$PLA_URL" ] && [ -n "$PWNAME" ]; then
+            mkdir -p /tmp/cf-pla-keepalive-1
+            cat > /tmp/cf-pla-keepalive-1/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.PLA_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 재시작 중', { status: 503 });
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                return new Response(r.body, { status: r.status, headers: r.headers });
+              } catch (e) {
+                return new Response('PHPLiteAdmin 오류: ' + e.message, { status: 503 });
+              }
+            }
+          };
+          WORKEREOF
+            cat > /tmp/cf-pla-keepalive-1/wrangler.toml << TOMLEOF
+          name = "${PWNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          PLA_ORIGIN = "${PLA_URL}"
+          TOMLEOF
+            cd /tmp/cf-pla-keepalive-1 && wrangler deploy --minify 2>/dev/null && echo "✓ PLA Worker 업데이트 (keepalive-1)" || echo "✗ PLA Worker 업데이트 실패 (keepalive-1)"
+          fi
           echo "keepalive-1 완료"
 
   keepalive-2:
@@ -316,9 +419,112 @@ jobs:
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
-          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
-          sleep 150
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate --logfile /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate --logfile /tmp/cf-pla.log 2>&1 &
+
+          WP_URL=""; PLA_URL=""
+          for i in $(seq 1 20); do
+            sleep 1
+            [ -z "$WP_URL" ] && WP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-wp.log 2>/dev/null | head -1 || true)
+            [ -z "$PLA_URL" ] && PLA_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-pla.log 2>/dev/null | head -1 || true)
+            [ -n "$WP_URL" ] && [ -n "$PLA_URL" ] && break
+          done
+          echo "WP_URL=$WP_URL"   >> $GITHUB_ENV
+          echo "PLA_URL=$PLA_URL" >> $GITHUB_ENV
+          echo "keepalive-2 터널 준비 완료: WP=$WP_URL PLA=$PLA_URL"
+
+      - name: CF Worker 갱신 (keepalive-2)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && { echo "CF 자격증명 없음 — 건너뜀"; exit 0; }
+          CFG="deploy/server-config.json"
+          WNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('worker_name',''))" || echo "")
+          PWNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_worker',''))" || echo "")
+          [ -z "$WNAME" ] && { echo "Worker 이름 없음 — 건너뜀"; exit 0; }
+          [ -z "$WP_URL" ] && { echo "터널 URL 없음 — 건너뜀"; exit 0; }
+
+          npm install -g wrangler --quiet --no-progress 2>/dev/null
+
+          mkdir -p /tmp/cf-wp-keepalive-2
+          cat > /tmp/cf-wp-keepalive-2/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.NGINX_ORIGIN;
+              if (!origin) return new Response(offlinePage(), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '30' } });
+              const url = new URL(request.url);
+              const target = new URL(origin);
+              target.pathname = url.pathname; target.search = url.search;
+              const headers = new Headers(request.headers);
+              headers.set('host', new URL(origin).host);
+              headers.set('x-forwarded-proto', 'https');
+              try {
+                const resp = await fetch(target.toString(), {
+                  method: request.method, headers,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                const out = new Headers(resp.headers);
+                out.set('x-powered-by', 'wpspot/serverless');
+                return new Response(resp.body, { status: resp.status, headers: out });
+              } catch (e) {
+                return new Response(offlinePage(e.message), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '60' } });
+              }
+            }
+          };
+          function offlinePage(m){return'<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">'
+          +'<meta http-equiv="refresh" content="30"><title>준비 중</title>'
+          +'<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}.c{text-align:center;max-width:420px;padding:2rem}h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+          +'<body><div class="c"><h2>⏳ 서버 재시작 중이에요</h2><p>잠시 후 자동으로 새로고침됩니다.</p>'
+          +(m?'<p style="color:#94a3b8;font-size:12px">'+m+'</p>':'')
+          +'</div></body></html>';}
+          WORKEREOF
+          cat > /tmp/cf-wp-keepalive-2/wrangler.toml << TOMLEOF
+          name = "${WNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          NGINX_ORIGIN = "${WP_URL}"
+          TOMLEOF
+          cd /tmp/cf-wp-keepalive-2 && wrangler deploy --minify 2>/dev/null && echo "✓ WP Worker 업데이트 (keepalive-2)" || echo "✗ WP Worker 업데이트 실패 (keepalive-2)"
+
+          PLA_URL="${PLA_URL:-}"
+          if [ -n "$PLA_URL" ] && [ -n "$PWNAME" ]; then
+            mkdir -p /tmp/cf-pla-keepalive-2
+            cat > /tmp/cf-pla-keepalive-2/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.PLA_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 재시작 중', { status: 503 });
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                return new Response(r.body, { status: r.status, headers: r.headers });
+              } catch (e) {
+                return new Response('PHPLiteAdmin 오류: ' + e.message, { status: 503 });
+              }
+            }
+          };
+          WORKEREOF
+            cat > /tmp/cf-pla-keepalive-2/wrangler.toml << TOMLEOF
+          name = "${PWNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          PLA_ORIGIN = "${PLA_URL}"
+          TOMLEOF
+            cd /tmp/cf-pla-keepalive-2 && wrangler deploy --minify 2>/dev/null && echo "✓ PLA Worker 업데이트 (keepalive-2)" || echo "✗ PLA Worker 업데이트 실패 (keepalive-2)"
+          fi
           echo "keepalive-2 완료"
 
   keepalive-3:
@@ -355,9 +561,112 @@ jobs:
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
-          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
-          sleep 90
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate --logfile /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate --logfile /tmp/cf-pla.log 2>&1 &
+
+          WP_URL=""; PLA_URL=""
+          for i in $(seq 1 20); do
+            sleep 1
+            [ -z "$WP_URL" ] && WP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-wp.log 2>/dev/null | head -1 || true)
+            [ -z "$PLA_URL" ] && PLA_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-pla.log 2>/dev/null | head -1 || true)
+            [ -n "$WP_URL" ] && [ -n "$PLA_URL" ] && break
+          done
+          echo "WP_URL=$WP_URL"   >> $GITHUB_ENV
+          echo "PLA_URL=$PLA_URL" >> $GITHUB_ENV
+          echo "keepalive-3 터널 준비 완료: WP=$WP_URL PLA=$PLA_URL"
+
+      - name: CF Worker 갱신 (keepalive-3)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && { echo "CF 자격증명 없음 — 건너뜀"; exit 0; }
+          CFG="deploy/server-config.json"
+          WNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('worker_name',''))" || echo "")
+          PWNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_worker',''))" || echo "")
+          [ -z "$WNAME" ] && { echo "Worker 이름 없음 — 건너뜀"; exit 0; }
+          [ -z "$WP_URL" ] && { echo "터널 URL 없음 — 건너뜀"; exit 0; }
+
+          npm install -g wrangler --quiet --no-progress 2>/dev/null
+
+          mkdir -p /tmp/cf-wp-keepalive-3
+          cat > /tmp/cf-wp-keepalive-3/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.NGINX_ORIGIN;
+              if (!origin) return new Response(offlinePage(), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '30' } });
+              const url = new URL(request.url);
+              const target = new URL(origin);
+              target.pathname = url.pathname; target.search = url.search;
+              const headers = new Headers(request.headers);
+              headers.set('host', new URL(origin).host);
+              headers.set('x-forwarded-proto', 'https');
+              try {
+                const resp = await fetch(target.toString(), {
+                  method: request.method, headers,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                const out = new Headers(resp.headers);
+                out.set('x-powered-by', 'wpspot/serverless');
+                return new Response(resp.body, { status: resp.status, headers: out });
+              } catch (e) {
+                return new Response(offlinePage(e.message), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '60' } });
+              }
+            }
+          };
+          function offlinePage(m){return'<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">'
+          +'<meta http-equiv="refresh" content="30"><title>준비 중</title>'
+          +'<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}.c{text-align:center;max-width:420px;padding:2rem}h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+          +'<body><div class="c"><h2>⏳ 서버 재시작 중이에요</h2><p>잠시 후 자동으로 새로고침됩니다.</p>'
+          +(m?'<p style="color:#94a3b8;font-size:12px">'+m+'</p>':'')
+          +'</div></body></html>';}
+          WORKEREOF
+          cat > /tmp/cf-wp-keepalive-3/wrangler.toml << TOMLEOF
+          name = "${WNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          NGINX_ORIGIN = "${WP_URL}"
+          TOMLEOF
+          cd /tmp/cf-wp-keepalive-3 && wrangler deploy --minify 2>/dev/null && echo "✓ WP Worker 업데이트 (keepalive-3)" || echo "✗ WP Worker 업데이트 실패 (keepalive-3)"
+
+          PLA_URL="${PLA_URL:-}"
+          if [ -n "$PLA_URL" ] && [ -n "$PWNAME" ]; then
+            mkdir -p /tmp/cf-pla-keepalive-3
+            cat > /tmp/cf-pla-keepalive-3/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.PLA_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 재시작 중', { status: 503 });
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                return new Response(r.body, { status: r.status, headers: r.headers });
+              } catch (e) {
+                return new Response('PHPLiteAdmin 오류: ' + e.message, { status: 503 });
+              }
+            }
+          };
+          WORKEREOF
+            cat > /tmp/cf-pla-keepalive-3/wrangler.toml << TOMLEOF
+          name = "${PWNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          PLA_ORIGIN = "${PLA_URL}"
+          TOMLEOF
+            cd /tmp/cf-pla-keepalive-3 && wrangler deploy --minify 2>/dev/null && echo "✓ PLA Worker 업데이트 (keepalive-3)" || echo "✗ PLA Worker 업데이트 실패 (keepalive-3)"
+          fi
           echo "keepalive-3 완료"
 
   keepalive-4:
@@ -394,7 +703,110 @@ jobs:
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate >> /tmp/cf-wp.log 2>&1 &
-          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate >> /tmp/cf-pla.log 2>&1 &
-          sleep 30
+          cloudflared tunnel --url http://127.0.0.1:${WP_PORT} --no-autoupdate --logfile /tmp/cf-wp.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:${PLA_PORT} --no-autoupdate --logfile /tmp/cf-pla.log 2>&1 &
+
+          WP_URL=""; PLA_URL=""
+          for i in $(seq 1 20); do
+            sleep 1
+            [ -z "$WP_URL" ] && WP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-wp.log 2>/dev/null | head -1 || true)
+            [ -z "$PLA_URL" ] && PLA_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf-pla.log 2>/dev/null | head -1 || true)
+            [ -n "$WP_URL" ] && [ -n "$PLA_URL" ] && break
+          done
+          echo "WP_URL=$WP_URL"   >> $GITHUB_ENV
+          echo "PLA_URL=$PLA_URL" >> $GITHUB_ENV
+          echo "keepalive-4 터널 준비 완료: WP=$WP_URL PLA=$PLA_URL"
+
+      - name: CF Worker 갱신 (keepalive-4)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && { echo "CF 자격증명 없음 — 건너뜀"; exit 0; }
+          CFG="deploy/server-config.json"
+          WNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('worker_name',''))" || echo "")
+          PWNAME=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_worker',''))" || echo "")
+          [ -z "$WNAME" ] && { echo "Worker 이름 없음 — 건너뜀"; exit 0; }
+          [ -z "$WP_URL" ] && { echo "터널 URL 없음 — 건너뜀"; exit 0; }
+
+          npm install -g wrangler --quiet --no-progress 2>/dev/null
+
+          mkdir -p /tmp/cf-wp-keepalive-4
+          cat > /tmp/cf-wp-keepalive-4/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.NGINX_ORIGIN;
+              if (!origin) return new Response(offlinePage(), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '30' } });
+              const url = new URL(request.url);
+              const target = new URL(origin);
+              target.pathname = url.pathname; target.search = url.search;
+              const headers = new Headers(request.headers);
+              headers.set('host', new URL(origin).host);
+              headers.set('x-forwarded-proto', 'https');
+              try {
+                const resp = await fetch(target.toString(), {
+                  method: request.method, headers,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                const out = new Headers(resp.headers);
+                out.set('x-powered-by', 'wpspot/serverless');
+                return new Response(resp.body, { status: resp.status, headers: out });
+              } catch (e) {
+                return new Response(offlinePage(e.message), { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '60' } });
+              }
+            }
+          };
+          function offlinePage(m){return'<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">'
+          +'<meta http-equiv="refresh" content="30"><title>준비 중</title>'
+          +'<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}.c{text-align:center;max-width:420px;padding:2rem}h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+          +'<body><div class="c"><h2>⏳ 서버 재시작 중이에요</h2><p>잠시 후 자동으로 새로고침됩니다.</p>'
+          +(m?'<p style="color:#94a3b8;font-size:12px">'+m+'</p>':'')
+          +'</div></body></html>';}
+          WORKEREOF
+          cat > /tmp/cf-wp-keepalive-4/wrangler.toml << TOMLEOF
+          name = "${WNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          NGINX_ORIGIN = "${WP_URL}"
+          TOMLEOF
+          cd /tmp/cf-wp-keepalive-4 && wrangler deploy --minify 2>/dev/null && echo "✓ WP Worker 업데이트 (keepalive-4)" || echo "✗ WP Worker 업데이트 실패 (keepalive-4)"
+
+          PLA_URL="${PLA_URL:-}"
+          if [ -n "$PLA_URL" ] && [ -n "$PWNAME" ]; then
+            mkdir -p /tmp/cf-pla-keepalive-4
+            cat > /tmp/cf-pla-keepalive-4/worker.js << 'WORKEREOF'
+          export default {
+            async fetch(request, env) {
+              const origin = env.PLA_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 재시작 중', { status: 503 });
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual',
+                });
+                return new Response(r.body, { status: r.status, headers: r.headers });
+              } catch (e) {
+                return new Response('PHPLiteAdmin 오류: ' + e.message, { status: 503 });
+              }
+            }
+          };
+          WORKEREOF
+            cat > /tmp/cf-pla-keepalive-4/wrangler.toml << TOMLEOF
+          name = "${PWNAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+          [vars]
+          PLA_ORIGIN = "${PLA_URL}"
+          TOMLEOF
+            cd /tmp/cf-pla-keepalive-4 && wrangler deploy --minify 2>/dev/null && echo "✓ PLA Worker 업데이트 (keepalive-4)" || echo "✗ PLA Worker 업데이트 실패 (keepalive-4)"
+          fi
           echo "keepalive-4 완료"
