@@ -1,40 +1,41 @@
 /* public/css/tokens.css
-   wpspot 디자인 토큰. design.md(Toss) 참고하여 색상 체계/spacing/radius/motion 정의.
-   product 도메인은 wpspot(워드프레스형 블로그스팟 호스팅) 고유. */
+   wpspot 디자인 토큰 — Cloudways 스타일 SaaS 호스팅 패널
+   디자인 컨셉: Clean / Professional / Enterprise / Modern SaaS / DevOps Friendly / Minimal UI
+   레퍼런스: 디자인 명세서(Cloudways 스타일) 기준 색상/타이포/레이아웃 체계 */
 
 :root {
-  /* ===== Brand ===== */
-  --color-blue-500: oklch(0.624 0.176 254);
-  --color-blue-600: oklch(0.522 0.176 257);
-  --color-blue-700: oklch(0.476 0.174 259);
-  --color-blue-50:  oklch(0.965 0.020 250);
+  /* ===== Brand (명세서 11. 색상 시스템) ===== */
+  --color-blue-700: #1D4ED8;  /* Hover */
+  --color-blue-600: #1D4ED8;
+  --color-blue-500: #2563EB;  /* Primary */
+  --color-blue-50:  #EFF6FF;
 
   /* ===== Greyscale ===== */
-  --color-grey-900: oklch(0.234 0.030 254);
-  --color-grey-800: oklch(0.342 0.030 253);
-  --color-grey-700: oklch(0.452 0.028 253);
-  --color-grey-600: oklch(0.555 0.022 253);
-  --color-grey-500: oklch(0.652 0.020 252);
-  --color-grey-400: oklch(0.752 0.016 251);
-  --color-grey-300: oklch(0.840 0.012 248);
-  --color-grey-200: oklch(0.913 0.008 247);
-  --color-grey-100: oklch(0.957 0.005 247);
-  --color-grey-50:  oklch(0.978 0.003 247);
-  --color-white:    oklch(1.000 0.000 0);
+  --color-grey-900: #111827;  /* Sidebar */
+  --color-grey-800: #1F2937;
+  --color-grey-700: #374151;
+  --color-grey-600: #4B5563;
+  --color-grey-500: #6B7280;
+  --color-grey-400: #9CA3AF;
+  --color-grey-300: #D1D5DB;
+  --color-grey-200: #E5E7EB;
+  --color-grey-100: #F3F4F6;
+  --color-grey-50:  #F9FAFB;  /* Background */
+  --color-white:    #FFFFFF; /* Card */
 
-  /* ===== Semantic ===== */
-  --color-red-500:   oklch(0.628 0.218 22);
-  --color-green-500: oklch(0.493 0.143 154);
-  --color-orange-500: oklch(0.748 0.183 56);
-  --color-navy-900:  oklch(0.155 0.060 261);
+  /* ===== Semantic (명세서 11) ===== */
+  --color-red-500:    #EF4444; /* Danger */
+  --color-green-500:  #10B981; /* Success */
+  --color-orange-500: #F59E0B; /* Warning */
+  --color-navy-900:   #111827;
 
   /* ===== Alpha ===== */
-  --fg-tertiary:   oklch(0.155 0.060 261 / 0.58);
-  --fg-quaternary: oklch(0.155 0.060 261 / 0.28);
-  --line-subtle:   oklch(0.000 0.000 0 / 0.08);
-  --bg-overlay:    oklch(0.000 0.000 0 / 0.56);
-  --press-overlay: oklch(0.000 0.000 0 / 0.26);
-  --disabled-opacity: 0.30;
+  --fg-tertiary:   rgba(17, 24, 39, 0.58);
+  --fg-quaternary: rgba(17, 24, 39, 0.28);
+  --line-subtle:   rgba(0, 0, 0, 0.06);
+  --bg-overlay:    rgba(0, 0, 0, 0.50);
+  --press-overlay: rgba(0, 0, 0, 0.20);
+  --disabled-opacity: 0.45;
 
   /* ===== Semantic alias ===== */
   --fill-brand: var(--color-blue-500);
@@ -46,36 +47,44 @@
   --fill-warning: var(--color-orange-500);
 
   --text-primary: var(--color-grey-900);
-  --text-secondary: var(--color-grey-700);
+  --text-secondary: var(--color-grey-600);
   --text-tertiary: var(--fg-tertiary);
-  --text-placeholder: var(--fg-quaternary);
+  --text-placeholder: var(--color-grey-400);
   --text-alt: var(--color-white);
   --text-brand: var(--color-blue-500);
   --text-danger: var(--color-red-500);
 
   --border-primary: var(--color-blue-500);
   --border-secondary: var(--color-grey-200);
-  --border-strong: var(--color-grey-400);
+  --border-strong: var(--color-grey-300);
   --border-subtle: var(--line-subtle);
 
-  /* ===== Typography ===== */
-  --font-family-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
-    "SF Pro Text", "SF Pro", "Apple SD Gothic Neo", "Noto Sans KR", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* ===== Sidebar 전용 토큰 (명세서 3) ===== */
+  --sidebar-bg: #111827;
+  --sidebar-width: 260px;
+  --sidebar-text: #9CA3AF;
+  --sidebar-text-active: #FFFFFF;
+  --sidebar-active-bg: #2563EB;
+  --sidebar-hover-bg: rgba(255,255,255,0.06);
 
-  --fs-display-1: 56px; --lh-display-1: 1.30; --ls-display-1: -0.005em;
-  --fs-display-2: 40px; --lh-display-2: 1.20; --ls-display-2: -0.020em;
-  --fs-h1: 28px; --lh-h1: 1.30; --ls-h1: -0.020em;
-  --fs-h2: 24px; --lh-h2: 1.30; --ls-h2: -0.020em;
-  --fs-h3: 22px; --lh-h3: 1.30; --ls-h3: -0.015em;
-  --fs-h4: 20px; --lh-h4: 1.35; --ls-h4: -0.015em;
-  --fs-title-1: 18px; --lh-title-1: 1.45; --ls-title-1: -0.010em;
-  --fs-title-2: 17px; --lh-title-2: 1.45; --ls-title-2: -0.010em;
-  --fs-body-1: 17px; --lh-body-1: 1.50; --ls-body-1: -0.005em;
-  --fs-body-2: 15px; --lh-body-2: 1.50; --ls-body-2: -0.005em;
+  /* ===== Typography (명세서 17) ===== */
+  --font-family-sans: "Inter", "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Noto Sans KR", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --fs-display-1: 40px; --lh-display-1: 1.20; --ls-display-1: -0.02em;
+  --fs-display-2: 32px; --lh-display-2: 1.22; --ls-display-2: -0.02em;
+  --fs-h1: 32px; --lh-h1: 1.25; --ls-h1: -0.015em;   /* Title */
+  --fs-h2: 24px; --lh-h2: 1.30; --ls-h2: -0.012em;   /* Section */
+  --fs-h3: 20px; --lh-h3: 1.35; --ls-h3: -0.010em;
+  --fs-h4: 18px; --lh-h4: 1.40; --ls-h4: -0.008em;   /* Card Title */
+  --fs-title-1: 18px; --lh-title-1: 1.40; --ls-title-1: -0.008em;
+  --fs-title-2: 16px; --lh-title-2: 1.40; --ls-title-2: -0.006em;
+  --fs-body-1: 16px; --lh-body-1: 1.55; --ls-body-1: 0;
+  --fs-body-2: 14px; --lh-body-2: 1.55; --ls-body-2: 0;  /* Body */
   --fs-body-3: 13px; --lh-body-3: 1.50; --ls-body-3: 0;
-  --fs-label-l: 17px; --lh-label-l: 1.25; --ls-label-l: -0.005em;
-  --fs-label-m: 15px; --lh-label-m: 1.25; --ls-label-m: -0.005em;
-  --fs-label-s: 13px; --lh-label-s: 1.25; --ls-label-s: 0;
+  --fs-label-l: 15px; --lh-label-l: 1.30; --ls-label-l: 0;
+  --fs-label-m: 14px; --lh-label-m: 1.30; --ls-label-m: 0;
+  --fs-label-s: 12px; --lh-label-s: 1.30; --ls-label-s: 0.01em;
   --fs-caption: 12px; --lh-caption: 1.40;
 
   --font-feature-numeric-tabular: "tnum";
@@ -86,16 +95,16 @@
   --space-5: 20px; --space-6: 24px; --space-7: 28px; --space-8: 32px;
   --space-10: 40px; --space-12: 48px; --space-16: 64px; --space-20: 80px;
 
-  /* ===== Radius ===== */
-  --radius-xs: 4px; --radius-s: 8px; --radius-m: 12px; --radius-l: 14px;
+  /* ===== Radius (명세서 6,12,13) ===== */
+  --radius-xs: 6px; --radius-s: 8px; --radius-m: 12px; --radius-l: 14px;
   --radius-xl: 16px; --radius-2xl: 20px; --radius-3xl: 24px; --radius-4xl: 32px;
   --radius-full: 999px;
 
-  /* ===== Elevation ===== */
-  --shadow-1: 0 1px 2px oklch(0.155 0.060 261 / 0.04), 0 1px 1px oklch(0.155 0.060 261 / 0.04);
-  --shadow-2: 0 4px 12px oklch(0.155 0.060 261 / 0.06), 0 1px 2px oklch(0.155 0.060 261 / 0.04);
-  --shadow-3: 0 12px 32px oklch(0.155 0.060 261 / 0.10), 0 2px 6px oklch(0.155 0.060 261 / 0.06);
-  --shadow-toast: 0 8px 24px oklch(0.155 0.060 261 / 0.16);
+  /* ===== Elevation (명세서 6) ===== */
+  --shadow-1: 0 2px 8px rgba(0,0,0,0.05);
+  --shadow-2: 0 4px 16px rgba(0,0,0,0.07);
+  --shadow-3: 0 12px 32px rgba(0,0,0,0.12);
+  --shadow-toast: 0 8px 24px rgba(0,0,0,0.18);
 
   /* ===== Motion ===== */
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
