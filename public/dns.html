@@ -196,6 +196,7 @@
 
   <script src="/js/app.js"></script>
   <script>
+    wpspot.renderShell("domains", "DNS 관리");
     const params = new URLSearchParams(location.search);
     const zoneId = params.get("zone");
     const domainName = params.get("domain") || "";
