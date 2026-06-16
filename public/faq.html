@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>FAQ — wpspot</title><link rel="stylesheet" href="/css/style.css" /></head>
+<body class="marketing-body">
+<header class="marketing-header"><a class="marketing-logo" href="/">wpspot</a><nav class="marketing-nav"><a href="/feature.html">Features</a><a href="/about.html">About</a><a href="/faq.html">FAQ</a><a href="/contact.html">Contact</a></nav><div class="marketing-actions"><a class="btn btn--ghost btn--s" href="/login.html">로그인</a><a class="btn btn--primary btn--s" href="/signup.html">시작하기</a></div></header>
+<main class="marketing-page"><span class="eyebrow">FAQ</span><h1>자주 묻는 질문</h1><div class="faq-list"><details open><summary>개인 도메인 없이도 생성할 수 있나요?</summary><p>네. 기본 주소는 Cloudflare의 <code>{worker}.{subdomain}.workers.dev</code> 형태로 제공되고, 개인 도메인은 이후 연결합니다.</p></details><details><summary>WordPress 데이터베이스는 무엇을 쓰나요?</summary><p>MySQL이 아니라 SQLite 플러그인 기반의 <code>wordpress.db</code> 또는 호환 SQLite 파일을 사용합니다.</p></details><details><summary>브라우저 WASM PHP를 사용하나요?</summary><p>아니요. GitHub Actions의 PHP 8.3 내장 서버와 Cloudflare Workers 프록시 구조를 사용합니다.</p></details><details><summary>하나의 계정에서 여러 사이트를 운영할 수 있나요?</summary><p>네. instances 페이지에서 모든 호스팅을 카드 형태로 확인하고 각각의 instance-info 패널에서 관리할 수 있습니다.</p></details></div></main>
+</body></html>

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Contact — wpspot</title><link rel="stylesheet" href="/css/style.css" /></head>
+<body class="marketing-body">
+<header class="marketing-header"><a class="marketing-logo" href="/">wpspot</a><nav class="marketing-nav"><a href="/feature.html">Features</a><a href="/about.html">About</a><a href="/faq.html">FAQ</a><a href="/contact.html">Contact</a></nav><div class="marketing-actions"><a class="btn btn--ghost btn--s" href="/login.html">로그인</a><a class="btn btn--primary btn--s" href="/signup.html">시작하기</a></div></header>
+<main class="marketing-page split"><section><span class="eyebrow">Contact</span><h1>문의하기</h1><p class="page-lead">호스팅 생성, 도메인 연결, Cloudflare Worker 배포 관련 문의를 보내주세요.</p><div class="contact-card"><b>직접 이메일</b><a href="mailto:choichoi3227@gmail.com">choichoi3227@gmail.com</a></div></section><form class="contact-form" id="contactForm"><label>이름<input required id="name" placeholder="홍길동" /></label><label>이메일<input required id="email" type="email" placeholder="you@example.com" /></label><label>제목<input required id="subject" placeholder="호스팅 문의" /></label><label>내용<textarea required id="message" rows="7" placeholder="문의 내용을 입력해주세요."></textarea></label><button class="btn btn--primary btn--l" type="submit">이메일 전송</button><p class="caption">버튼을 누르면 기본 메일 앱을 통해 choichoi3227@gmail.com으로 실제 발송할 수 있습니다.</p></form></main>
+<script>
+document.getElementById('contactForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = document.getElementById('name').value.trim();
+  const email = document.getElementById('email').value.trim();
+  const subject = document.getElementById('subject').value.trim();
+  const message = document.getElementById('message').value.trim();
+  const body = `이름: ${name}\n이메일: ${email}\n\n${message}`;
+  location.href = `mailto:choichoi3227@gmail.com?subject=${encodeURIComponent('[wpspot] ' + subject)}&body=${encodeURIComponent(body)}`;
+});
+</script>
+</body></html>

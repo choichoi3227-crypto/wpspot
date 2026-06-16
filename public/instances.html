@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Instances — wpspot</title><link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell cloud-panel">
+    <aside class="panel-sidebar"><a class="panel-logo" href="/dashboard.html">wpspot</a><nav><a class="active" href="/instances.html">Instances</a><a href="/dashboard.html">Dashboard</a><a href="/domains.html">Domains</a><a href="/account.html">Settings</a></nav></aside>
+    <header class="top-bar"><span class="top-bar__title">Instances</span><div class="row"><a href="/dashboard.html" class="btn btn--primary btn--s">+ Launch Server</a><button class="btn btn--ghost btn--s" id="logoutBtn">로그아웃</button></div></header>
+    <main class="screen">
+      <section class="panel-hero"><div><span class="eyebrow">Cloudflare-style Cards</span><h1 class="h1">모든 호스팅 인스턴스</h1><p class="body-2">생성된 WordPress 호스팅을 카드로 확인하고, 각 인스턴스의 도메인/DB/파일 관리로 이동하세요.</p></div><a class="btn btn--primary btn--l" href="/dashboard.html">Launch Server</a></section>
+      <section class="kpi-grid" id="kpiGrid"><div class="kpi-card"><span>Total</span><strong>—</strong></div><div class="kpi-card"><span>Active</span><strong>—</strong></div><div class="kpi-card"><span>Provisioning</span><strong>—</strong></div><div class="kpi-card"><span>Domains</span><strong>—</strong></div></section>
+      <section id="instancesGrid" class="instance-grid"><div class="empty">불러오는 중…</div></section>
+    </main>
+  </div>
+<script src="/js/app.js"></script>
+<script>
+if (wpspot.requireAuth()) loadInstances();
+document.getElementById('logoutBtn').addEventListener('click',()=>{wpspot.clearSession();location.href='/login.html';});
+async function loadInstances(){
+  const grid=document.getElementById('instancesGrid');
+  try{
+    const data=await wpspot.api('/api/sites'); const sites=data.sites||[];
+    const active=sites.filter(s=>s.status==='active').length; const provisioning=sites.filter(s=>s.status==='provisioning').length; const domains=sites.filter(s=>s.custom_domain).length;
+    document.getElementById('kpiGrid').innerHTML=`<div class="kpi-card"><span>Total</span><strong>${sites.length}</strong></div><div class="kpi-card"><span>Active</span><strong>${active}</strong></div><div class="kpi-card"><span>Provisioning</span><strong>${provisioning}</strong></div><div class="kpi-card"><span>Domains</span><strong>${domains}</strong></div>`;
+    grid.innerHTML=sites.length?sites.map(card).join(''):`<div class="empty">아직 생성된 호스팅이 없습니다.</div>`;
+  }catch(e){grid.innerHTML=`<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;}
+}
+function card(site){const url=site.custom_domain?`https://${site.custom_domain}`:site.cf_worker_url; return `<article class="instance-card"><div class="instance-card__top"><div><h3>${wpspot.escapeHtml(site.site_name)}</h3><p>${wpspot.escapeHtml(site.github_repo||site.site_slug)}</p></div>${wpspot.statusBadge(site.status)}</div><div class="resource-lines"><label>CPU <progress value="38" max="100"></progress></label><label>RAM <progress value="52" max="100"></progress></label><label>Traffic <progress value="64" max="100"></progress></label></div><div class="instance-meta"><span>Worker</span><b>${wpspot.escapeHtml(site.cf_worker_name||'pending')}</b></div><div class="instance-meta"><span>Domain</span><b>${wpspot.escapeHtml(site.custom_domain||'workers.dev 기본')}</b></div><div class="btn-row"><a class="btn btn--primary btn--s" href="/instance-info.html?site=${encodeURIComponent(site.id)}">Manage</a>${url?`<a class="btn btn--secondary btn--s" target="_blank" href="${wpspot.escapeHtml(url)}">Open</a>`:''}<a class="btn btn--secondary btn--s" href="/file-manager.html?site=${encodeURIComponent(site.id)}">Files</a></div></article>`;}
+</script>
+</body></html>

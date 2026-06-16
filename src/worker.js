@@ -269,13 +269,13 @@ async function handleApi(request, env, url) {
   if (provisionMatch && method === "POST") {
     const siteId = provisionMatch[1];
     const body = await request.json().catch(() => ({}));
-    const { customDomain, zoneId } = body;
+    const { customDomain = "", zoneId = "" } = body;
 
     const site = await env.DB.prepare(
       "SELECT * FROM sites WHERE id=? AND user_id=?"
     ).bind(siteId, userId).first();
     if (!site) return err("사이트를 찾을 수 없습니다.", 404);
-    if (!customDomain) return err("개인 도메인이 필요합니다.", 400);
+    // 도메인은 호스팅 생성 후 호스팅 정보 화면에서 사용자가 직접 연결합니다.
 
     const cred = await env.DB.prepare(
       "SELECT * FROM user_credentials WHERE user_id=?"
@@ -284,6 +284,8 @@ async function handleApi(request, env, url) {
       return err("GitHub Token을 먼저 등록해주세요.", 400);
     if (!cred?.cf_global_api_key_enc || !cred?.cf_account_email)
       return err("Cloudflare Global API Key와 이메일을 먼저 등록해주세요.", 400);
+    if (!cred?.cf_api_token_enc)
+      return err("Cloudflare Worker 배포용 API Token을 먼저 등록해주세요.", 400);
 
     const jobId = uid();
     await env.DB.prepare(
@@ -356,7 +358,8 @@ async function handleApi(request, env, url) {
         site_slug:             site.site_slug,
         site_display_name:     site.site_name,
         custom_domain:         customDomain,
-        pma_domain:            `pma.${customDomain}`,
+        pma_domain:            customDomain ? `pma.${customDomain}` : "",
+        workers_dev_url:       workerUrl,
         wp_admin_user:         wpAdminUser,
         wp_admin_pass:         wpAdminPass,
         secret_cf_account_id:  accountId,
@@ -390,10 +393,10 @@ async function handleApi(request, env, url) {
         ).run();
       }
 
-      await initWpOptions(env.DB, siteId, site.site_name, `https://${customDomain}`);
+      await initWpOptions(env.DB, siteId, site.site_name, workerUrl);
 
-      // Zone에 Worker Route 연결
-      if (zoneId) {
+      // Zone에 Worker Route 연결 (도메인이 명시된 수동 연결 또는 이전 호환 경로)
+      if (zoneId && customDomain) {
         await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName)
           .catch(() => {});
         await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName)
@@ -410,9 +413,9 @@ async function handleApi(request, env, url) {
         ok: true,
         workerUrl,
         githubRepo:  repoFullName,
-        customDomain,
-        pmaDomain:   `pma.${customDomain}`,
-        nextStep:    "GitHub Actions provision 워크플로우가 WordPress를 설치하고 있어요. 약 3~5분 후 사이트가 활성화됩니다.",
+        customDomain: customDomain || null,
+        pmaDomain:   customDomain ? `pma.${customDomain}` : null,
+        nextStep:    "GitHub Actions가 WordPress 파일, SQLite DB, PHPLiteAdmin, Cloudflare Workers 배포까지 검증한 뒤 활성화합니다.",
       });
     } catch (e) {
       console.error("Provision error:", e.message, e.stack);
@@ -508,7 +511,10 @@ async function handleApi(request, env, url) {
     }
 
     const customDomain = site.custom_domain;
-    const plaUrl   = customDomain ? `https://pma.${customDomain}` : (site.tunnel_pla_url || null);
+    const pmaWorkerUrl = site.cf_worker_name && site.cf_worker_url
+      ? site.cf_worker_url.replace(`https://${site.cf_worker_name}.`, `https://${site.cf_worker_name}-pma.`)
+      : null;
+    const plaUrl   = customDomain ? `https://pma.${customDomain}` : (pmaWorkerUrl || site.tunnel_pla_url || null);
     const adminUrl = customDomain
       ? `https://${customDomain}/wp-admin`
       : (site.cf_worker_url ? `${site.cf_worker_url}/wp-admin` : null);
@@ -537,6 +543,7 @@ async function handleApi(request, env, url) {
         pmaDomain:    customDomain ? `pma.${customDomain}` : null,
         tunnelWpUrl:  site.cf_worker_url,
         tunnelPlaUrl: site.tunnel_pla_url,
+        pmaWorkerUrl,
       },
     });
   }

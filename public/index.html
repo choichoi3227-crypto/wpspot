@@ -3,46 +3,69 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>wpspot — 워드프레스형 블로그스팟 호스팅</title>
+  <title>wpspot — Cloudflare 기반 WordPress SaaS Hosting</title>
+  <meta name="description" content="Cloudflare Workers, GitHub Actions, SQLite 기반의 전문 WordPress 호스팅 패널" />
   <link rel="stylesheet" href="/css/style.css" />
 </head>
-<body>
-  <div class="app-shell">
-    <div class="top-bar">
-      <span class="top-bar__brand">wpspot</span>
-      <a href="/login.html" class="btn btn--ghost btn--s">로그인</a>
+<body class="marketing-body">
+  <header class="marketing-header">
+    <a class="marketing-logo" href="/">wpspot</a>
+    <nav class="marketing-nav" aria-label="주요 메뉴">
+      <a href="/feature.html">Features</a>
+      <a href="/about.html">About</a>
+      <a href="/faq.html">FAQ</a>
+      <a href="/contact.html">Contact</a>
+    </nav>
+    <div class="marketing-actions">
+      <a class="btn btn--ghost btn--s" href="/login.html">로그인</a>
+      <a class="btn btn--primary btn--s" href="/signup.html">시작하기</a>
     </div>
+  </header>
 
-    <div class="screen">
-      <section class="section text-center" style="padding-top: var(--space-10);">
-        <h1 class="h1">블로그스팟을<br/>워드프레스처럼</h1>
-        <p class="body-2">
-          깃허브와 클라우드플레어로 워드프레스 원본을 그대로 띄우고,<br/>
-          블로그스팟을 프론트엔드로 사용하는 100% 무료 호스팅이에요.
-        </p>
-      </section>
-
-      <section class="section">
-        <div class="card">
-          <div class="title-1">엔터프라이즈급 성능을, 무료로</div>
-          <p class="body-2">
-            워드프레스 원본 파일과 폴더를 그대로 사용해요. 99.9%의 백엔드는 워드프레스가
-            담당하고, 블로그스팟은 화면만 보여줘요. wp-admin 경로로 그대로 접속해 관리할 수 있어요.
-          </p>
+  <main>
+    <section class="hero-section">
+      <div class="hero-copy">
+        <span class="eyebrow">Cloudways-style SaaS Hosting Panel</span>
+        <h1>WordPress 호스팅을<br/>Cloudflare 위에서 더 쉽게.</h1>
+        <p>wpspot은 Cloudflare Workers 기본 도메인, GitHub 기반 파일 관리, SQLite 데이터베이스, PHPLiteAdmin을 하나의 전문 SaaS 패널로 묶어 제공합니다.</p>
+        <div class="hero-actions">
+          <a class="btn btn--primary btn--l" href="/signup.html">Launch Server</a>
+          <a class="btn btn--secondary btn--l" href="/feature.html">기능 보기</a>
         </div>
-        <div class="card">
-          <div class="title-1">필요한 건 토큰 3개뿐</div>
-          <p class="body-2">
-            GitHub Token, GCP(Blogger API) Token, Cloudflare Global API Key를 내 계정에
-            등록하면 wpspot이 레포 생성부터 프록시 워커 배포까지 자동으로 처리해요.
-          </p>
+        <div class="hero-metrics" aria-label="서비스 특징">
+          <div><strong>workers.dev</strong><span>기본 주소 자동 제공</span></div>
+          <div><strong>SQLite</strong><span>.db 기반 WordPress DB</span></div>
+          <div><strong>DevOps</strong><span>GitHub Actions 자동화</span></div>
         </div>
-      </section>
-    </div>
+      </div>
+      <div class="hero-panel" aria-label="호스팅 패널 미리보기">
+        <div class="panel-top"><span></span><span></span><span></span></div>
+        <div class="kpi-grid mini">
+          <div class="kpi-card"><span>Servers</span><strong>12</strong></div>
+          <div class="kpi-card"><span>Apps</span><strong>45</strong></div>
+          <div class="kpi-card"><span>CPU</span><strong>38%</strong></div>
+          <div class="kpi-card"><span>Bandwidth</span><strong>432GB</strong></div>
+        </div>
+        <div class="server-preview">
+          <div><b>wordpress-production</b><span>DigitalOcean · 4 CPU · 8GB RAM</span></div>
+          <i>Online</i>
+          <label>CPU <progress value="60" max="100"></progress></label>
+          <label>RAM <progress value="40" max="100"></progress></label>
+        </div>
+      </div>
+    </section>
 
-    <div class="bottom-cta-wrap">
-      <a href="/signup.html" class="btn btn--primary btn--xl">시작하기</a>
-    </div>
-  </div>
+    <section class="marketing-section">
+      <div class="section-heading">
+        <span class="eyebrow">Why wpspot</span>
+        <h2>초보자도 이해하는 엔터프라이즈 호스팅 흐름</h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature-card"><span>01</span><h3>Workers-first 기본 주소</h3><p>개인 도메인 없이도 생성 즉시 Cloudflare workers.dev 주소를 기본 엔드포인트로 사용합니다.</p></article>
+        <article class="feature-card"><span>02</span><h3>WordPress 파일 그대로</h3><p>생성된 GitHub 레포에서 WordPress 원본, 플러그인, PHPLiteAdmin 파일을 확인하고 관리할 수 있습니다.</p></article>
+        <article class="feature-card"><span>03</span><h3>도메인은 나중에 연결</h3><p>호스팅이 정상 생성된 뒤 instance-info 패널에서 사용자 도메인을 직접 연결합니다.</p></article>
+      </div>
+    </section>
+  </main>
 </body>
 </html>

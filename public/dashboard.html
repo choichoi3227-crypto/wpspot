@@ -96,6 +96,7 @@
     <div class="top-bar">
       <span class="top-bar__brand">wpspot</span>
       <div class="row">
+        <a href="/instances.html" class="btn btn--ghost btn--s">Instances</a>
         <a href="/domains.html" class="btn btn--ghost btn--s">도메인</a>
         <a href="/account.html" class="btn btn--ghost btn--s">내 계정</a>
         <button class="btn btn--ghost btn--s" id="logoutBtn">로그아웃</button>
@@ -116,26 +117,12 @@
             <div class="field__help">어떤 이름이든 괜찮아요.</div>
           </div>
 
-          <div class="field">
-            <label class="field__label">도메인 <span style="font-weight:400;color:var(--text-secondary);">(Cloudflare 네임서버 기반)</span></label>
-            <div class="domain-select-row">
-              <select id="domainSelect" onchange="onDomainChange()">
-                <option value="">— 불러오는 중… —</option>
-              </select>
-              <a href="/domains.html" class="btn btn--secondary btn--s" style="white-space:nowrap;flex-shrink:0;" target="_blank">+ 추가</a>
-            </div>
-            <!-- 서브도메인 -->
-            <div class="subdomain-row" id="subdomainRow">
-              <input type="text" id="subdomainInput" placeholder="www (비워두면 루트)" oninput="updatePreview()" />
-              <span class="subdomain-sep">.</span>
-              <span class="subdomain-base" id="subdomainBase"></span>
-            </div>
-            <div class="domain-preview" id="domainPreview"></div>
-            <div class="field__help">없으면 나중에 호스팅 관리에서 연결할 수 있어요.</div>
+          <div class="notice-box info" style="margin:var(--space-4) 0;">
+            기본 주소는 Cloudflare Workers의 <code>{워커명}.{사용자서브도메인}.workers.dev</code>로 자동 생성됩니다. 개인 도메인은 호스팅 생성 완료 후 <b>호스팅 관리 → 도메인 연결</b>에서 직접 연결하세요.
           </div>
 
           <div id="createError" style="color:var(--text-danger);font-size:var(--fs-body-3);margin-bottom:var(--space-3);display:none;"></div>
-          <button class="btn btn--primary btn--l" id="createBtn" onclick="createSite()">사이트 추가</button>
+          <button class="btn btn--primary btn--l" id="createBtn" onclick="createSite()">Launch Server</button>
         </div>
       </section>
 
@@ -156,7 +143,6 @@
     let zones = [];
 
     if (wpspot.requireAuth()) {
-      loadZones();
       loadSites();
     }
 
@@ -170,69 +156,9 @@
       if (e.key === "Enter") createSite();
     });
 
-    // ── Zone 목록 ─────────────────────────────────────────────────────────
-    async function loadZones() {
-      const sel = document.getElementById("domainSelect");
-      try {
-        const data = await wpspot.api("/api/domains");
-        zones = data.zones || [];
-        if (!zones.length) {
-          sel.innerHTML = '<option value="">— 등록된 도메인 없음 —</option>';
-          return;
-        }
-        sel.innerHTML =
-          '<option value="">— 나중에 연결 (선택 안 함) —</option>' +
-          zones.map(z =>
-            `<option value="${esc(z.id)}" data-name="${esc(z.name)}">`
-            + `${esc(z.name)}${z.status === 'active' ? ' ✅' : ' ⏳'}`
-            + `</option>`
-          ).join("");
-      } catch (e) {
-        sel.innerHTML = `<option value="">로드 실패: ${esc(e.message)}</option>`;
-      }
-    }
-
-    function onDomainChange() {
-      const sel = document.getElementById("domainSelect");
-      const opt = sel.options[sel.selectedIndex];
-      const name = opt?.dataset?.name || "";
-      const row = document.getElementById("subdomainRow");
-      const base = document.getElementById("subdomainBase");
-      const preview = document.getElementById("domainPreview");
-
-      if (!sel.value || !name) {
-        row.classList.remove("visible");
-        preview.innerHTML = "";
-        return;
-      }
-      base.textContent = name;
-      row.classList.add("visible");
-      updatePreview();
-    }
-
-    function updatePreview() {
-      const sel = document.getElementById("domainSelect");
-      const opt = sel.options[sel.selectedIndex];
-      const rootDomain = opt?.dataset?.name || "";
-      if (!rootDomain) return;
-      const sub = document.getElementById("subdomainInput").value.trim();
-      const full = sub ? `${sub}.${rootDomain}` : rootDomain;
-      document.getElementById("domainPreview").innerHTML =
-        `최종 주소: <b>https://${esc(full)}</b>`;
-    }
-
     // ── 사이트 생성 ───────────────────────────────────────────────────────
     async function createSite() {
       const siteName = document.getElementById("siteName").value.trim();
-      const sel = document.getElementById("domainSelect");
-      const opt = sel.options[sel.selectedIndex];
-      const rootDomain = opt?.dataset?.name || "";
-      const zoneId = sel.value;
-      const sub = document.getElementById("subdomainInput").value.trim();
-      const customDomain = (zoneId && rootDomain)
-        ? (sub ? `${sub}.${rootDomain}` : rootDomain)
-        : null;
-
       const errEl = document.getElementById("createError");
       errEl.style.display = "none";
 
@@ -244,7 +170,7 @@
 
       const btn = document.getElementById("createBtn");
       btn.disabled = true;
-      btn.textContent = "추가 중…";
+      btn.textContent = "생성 준비 중…";
 
       try {
         // 1) 사이트 레코드 생성
@@ -253,35 +179,22 @@
           body: JSON.stringify({ siteName }),
         });
 
-        // 2) 도메인 선택된 경우 → 프로비저닝 자동 실행
-        if (customDomain && site.id) {
-          btn.textContent = "프로비저닝 중…";
-          try {
-            await wpspot.api(`/api/sites/${site.id}/provision`, {
-              method: "POST",
-              body: JSON.stringify({ customDomain, zoneId }),
-            });
-            wpspot.toast("프로비저닝 시작! GitHub Actions가 WordPress를 설치하고 있어요 (~3~5분)");
-          } catch (pe) {
-            wpspot.toast(`사이트 추가 완료, 프로비저닝 실패: ${pe.message}`);
-          }
-        } else {
-          wpspot.toast("사이트가 추가됐어요. 호스팅 관리에서 도메인을 연결해주세요.");
-        }
+        btn.textContent = "워드프레스 호스팅 생성 중…";
+        await wpspot.api(`/api/sites/${site.id}/provision`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        wpspot.toast("호스팅 생성이 시작됐어요. 모든 파일과 Worker 배포 검증 후 활성화됩니다.");
 
         // 폼 초기화
         document.getElementById("siteName").value = "";
-        sel.value = "";
-        document.getElementById("subdomainInput").value = "";
-        document.getElementById("subdomainRow").classList.remove("visible");
-        document.getElementById("domainPreview").innerHTML = "";
         loadSites();
       } catch (e) {
         errEl.textContent = e.message;
         errEl.style.display = "";
       } finally {
         btn.disabled = false;
-        btn.textContent = "사이트 추가";
+        btn.textContent = "Launch Server";
       }
     }
 
