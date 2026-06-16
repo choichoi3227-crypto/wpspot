@@ -244,7 +244,7 @@
             </div>
           ` : `
             <div class="notice-box warn">
-              ⚠️ 개인 도메인이 연결되지 않았어요. 도메인을 연결해야 PHPLiteAdmin(<code>pma.도메인</code>)에 접속할 수 있어요.
+              ⚠️ 개인 도메인이 연결되지 않아도 기본 workers.dev 주소로 접속할 수 있어요. 멀티 사이트용 개인 도메인은 이 화면에서 직접 연결하세요.
             </div>
             ${nginx.workerUrl ? `
               <div class="field-row mt-3">
@@ -341,7 +341,7 @@
             <div class="info-card__icon">⚙️</div>
             <div>
               <div class="info-card__title">인프라 구성</div>
-              <div class="info-card__subtitle">nginx + PHP-FPM + SQLite</div>
+              <div class="info-card__subtitle">Cloudflare Workers + PHP 8.3 + SQLite</div>
             </div>
           </div>
 
@@ -358,7 +358,7 @@
           </div>
           <div class="field-row">
             <span class="field-label">실행 엔진</span>
-            ${fv('nginx + PHP-FPM 8.3 + SQLite (GitHub Actions)')}
+            ${fv('Cloudflare Workers + PHP 8.3 내장 서버 + SQLite (.db)')}
           </div>
           <div class="field-row">
             <span class="field-label">서버 상태</span>
