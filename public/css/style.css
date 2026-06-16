@@ -253,3 +253,18 @@ img, svg { display: block; }
 .mt-2 { margin-top: var(--space-2); }
 .mt-6 { margin-top: var(--space-6); }
 .hidden { display: none !important; }
+
+/* ===== Cloudways-style SaaS layout ===== */
+body { background: #f9fafb; }
+.app-shell { max-width: none; background: #f9fafb; }
+@media (min-width: 900px) {
+  .app-shell { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  .top-bar { grid-column: 2; height: 72px; background: #fff; border-bottom: 1px solid #e5e7eb; padding: 0 32px; }
+  .top-bar::before { content: "Search servers, apps, domains"; flex: 1; max-width: 420px; height: 44px; display: flex; align-items: center; padding: 0 16px; border: 1px solid #e5e7eb; border-radius: 12px; color: #9ca3af; background: #f9fafb; font-size: 14px; }
+  .screen { grid-column: 2; padding: 32px; }
+  .app-shell::before { content: "wpspot\A\A▣  Dashboard\A▦  Projects\A  ├ Applications\A  ├ Websites\A▤  Servers\A  ├ Server List\A  ├ Monitoring\A  ├ Backups\A◇  Domains\A▣  SSL\A◉  Team\A◌  Billing\A⚙  Settings"; white-space: pre-line; grid-row: 1 / span 2; grid-column: 1; background: #111827; color: #d1d5db; padding: 28px 20px; font-weight: 600; line-height: 2.2; }
+  .card, .info-card { border: 0; border-radius: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.05); }
+}
+.btn--primary { background: #2563eb; border-radius: 12px; min-height: 44px; }
+.btn--primary:hover { background: #1d4ed8; }
+.btn--secondary { background: #fff; border: 1px solid #d1d5db; }

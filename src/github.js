@@ -26,7 +26,7 @@ export async function createRepo(token, repoName) {
       name: repoName,
       private: true,
       auto_init: true,
-      description: "wpspot — WordPress hosting (nginx + PHP-FPM + SQLite)",
+      description: "wpspot — WordPress hosting (Cloudflare Workers + PHP + SQLite)",
     }),
   });
   if (!res.ok && res.status !== 422) {
