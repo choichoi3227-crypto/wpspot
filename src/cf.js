@@ -179,7 +179,45 @@ export async function deleteWorkerRoute(email, globalApiKey, zoneId, routeId) {
   return data.result;
 }
 
+// 단일 파일 Worker를 Cloudflare API로 직접 배포 (wrangler 불필요, ES module worker)
+export async function deployModuleWorker(email, globalApiKey, accountId, scriptName, jsContent) {
+  const metadata = {
+    main_module: "worker.js",
+    compatibility_date: "2024-09-23",
+  };
+  const form = new FormData();
+  form.append("metadata", JSON.stringify(metadata));
+  form.append("worker.js", new Blob([jsContent], { type: "application/javascript+module" }), "worker.js");
+
+  const res = await fetch(`${CF_API}/accounts/${accountId}/workers/scripts/${scriptName}`, {
+    method: "PUT",
+    headers: { "X-Auth-Email": email, "X-Auth-Key": globalApiKey }, // Content-Type은 FormData가 boundary 포함해 자동 설정
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.success) throw new Error(`Worker 배포 실패 (${scriptName}): ${JSON.stringify(data.errors || data)}`);
+  return data.result;
+}
+
 // ── Cloudflare Cache 제거 ──────────────────────────────────────────────────
+
+// Worker Route가 매칭되려면 해당 호스트명에 proxied DNS 레코드가 존재해야 함.
+// 실제 origin은 Worker가 처리하므로 더미 IP(192.0.2.1, TEST-NET-1)를 사용.
+export async function ensureProxiedRecord(email, globalApiKey, zoneId, hostname) {
+  const records = await listDnsRecords(email, globalApiKey, zoneId);
+  const existing = records.find(r => r.name === hostname && (r.type === "A" || r.type === "CNAME"));
+  if (existing) {
+    if (!existing.proxied) {
+      await updateDnsRecord(email, globalApiKey, zoneId, existing.id, {
+        type: existing.type, name: hostname, content: existing.content, proxied: true, ttl: 1,
+      });
+    }
+    return existing;
+  }
+  return await createDnsRecord(email, globalApiKey, zoneId, {
+    type: "A", name: hostname, content: "192.0.2.1", proxied: true, ttl: 1,
+  });
+}
 
 // 특정 Zone의 캐시 전체 퍼지
 export async function purgeCache(email, globalApiKey, zoneId) {
