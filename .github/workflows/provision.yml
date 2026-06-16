@@ -613,5 +613,7 @@ jobs:
       - name: 서버 유지 (keepalive 인계 전)
         run: |
           echo "PHP 서버 + cloudflared 터널 유지 중..."
-          sleep 240
+          # GitHub Actions cron(*/5)은 정시 실행이 보장되지 않고 지연될 수 있어
+          # keepalive workflow가 이어받을 시간을 넉넉히 확보 (4분 → 6분)
+          sleep 360
           echo "provision job 종료 — keepalive workflow가 계속 유지합니다."
