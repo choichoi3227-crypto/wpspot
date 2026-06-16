@@ -18,10 +18,6 @@ on:
         description: "PHPLiteAdmin 도메인 (예: pma.example.com)"
         required: false
         default: ""
-      workers_dev_url:
-        description: "기본 Cloudflare workers.dev URL"
-        required: false
-        default: ""
       wp_admin_user:
         description: "WordPress 관리자 ID"
         required: false
@@ -174,11 +170,8 @@ jobs:
         run: |
           cd wordpress
           CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
-          WORKER_NAME="${{ inputs.secret_worker_name }}"
-          [ -z "$WORKER_NAME" ] && WORKER_NAME="wpspot-${{ inputs.site_slug }}"
-          WORKERS_DEV_URL="${{ inputs.workers_dev_url }}"
           SITE_URL="${CUSTOM_DOMAIN:+https://${CUSTOM_DOMAIN}}"
-          SITE_URL="${SITE_URL:-${WORKERS_DEV_URL}}"
+          SITE_URL="${SITE_URL:-https://${{ inputs.site_slug }}.wpspot.app}"
           DISPLAY="${{ inputs.site_display_name }}"
           [ -z "$DISPLAY" ] && DISPLAY="${{ inputs.site_slug }}"
 
@@ -233,11 +226,8 @@ jobs:
         run: |
           cd wordpress
           CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
-          WORKER_NAME="${{ inputs.secret_worker_name }}"
-          [ -z "$WORKER_NAME" ] && WORKER_NAME="wpspot-${{ inputs.site_slug }}"
-          WORKERS_DEV_URL="${{ inputs.workers_dev_url }}"
           SITE_URL="${CUSTOM_DOMAIN:+https://${CUSTOM_DOMAIN}}"
-          SITE_URL="${SITE_URL:-${WORKERS_DEV_URL}}"
+          SITE_URL="${SITE_URL:-https://${{ inputs.site_slug }}.wpspot.app}"
           DISPLAY="${{ inputs.site_display_name }}"
           [ -z "$DISPLAY" ] && DISPLAY="${{ inputs.site_slug }}"
           WP_PASS="${{ inputs.wp_admin_pass }}"
@@ -368,8 +358,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::Cloudflare API Token과 Account ID가 있어야 Worker를 생성할 수 있습니다."
-            exit 1
+            echo "CF 자격증명 없음 — Worker 배포 건너뜀"
+            exit 0
           fi
 
           WORKER_NAME="${{ inputs.secret_worker_name }}"
@@ -500,9 +490,6 @@ jobs:
 
             cd /tmp/cf-pla && wrangler deploy --minify
             echo "PLA Worker 배포 완료: ${PMA_WORKER}"
-          else
-            echo "::error::PHPLiteAdmin 터널 URL이 없어 PMA Worker를 생성할 수 없습니다."
-            exit 1
           fi
 
       # ── wpspot API 콜백 ──────────────────────────────────────────────────
@@ -616,7 +603,7 @@ jobs:
           [ -n "$DOMAIN" ] && echo "  사이트:   https://${DOMAIN}"
           echo "  WP 터널:  ${TUNNEL_WP_URL}"
           echo "  PLA 터널: ${TUNNEL_PLA_URL:-없음}"
-          echo "  엔진:     PHP 8.3 내장 서버 + Cloudflare Workers"
+          echo "  엔진:     PHP 8.3 내장 서버 (nginx 불필요)"
           echo "  DB:       SQLite (WordPress 내장)"
           echo "============================================"
 
@@ -626,5 +613,7 @@ jobs:
       - name: 서버 유지 (keepalive 인계 전)
         run: |
           echo "PHP 서버 + cloudflared 터널 유지 중..."
-          sleep 240
+          # GitHub Actions cron(*/5)은 정시 실행이 보장되지 않고 지연될 수 있어
+          # keepalive workflow가 이어받을 시간을 넉넉히 확보 (4분 → 6분)
+          sleep 360
           echo "provision job 종료 — keepalive workflow가 계속 유지합니다."
