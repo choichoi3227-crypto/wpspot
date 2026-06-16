@@ -29,6 +29,18 @@ function randomToken() {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+// 301 리다이렉트 전용 경량 Worker 코드 생성 (alias 도메인 → primary 도메인)
+function buildRedirectWorkerJs(targetHostname) {
+  return `export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    url.hostname = ${JSON.stringify(targetHostname)};
+    url.protocol = "https:";
+    return Response.redirect(url.toString(), 301);
+  }
+};`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -258,6 +270,7 @@ async function handleApi(request, env, url) {
     await env.DB.prepare("DELETE FROM pla_tokens WHERE site_id=?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM site_credentials WHERE site_id=?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM site_jobs WHERE site_id=?").bind(siteId).run().catch(() => {});
+    await env.DB.prepare("DELETE FROM site_domain_bindings WHERE site_id=?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM site_domains WHERE cf_zone_id=? AND user_id=?").bind(site.cf_zone_id || "", userId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM sites WHERE id=?").bind(siteId).run();
     return json({ ok: true });
@@ -269,13 +282,13 @@ async function handleApi(request, env, url) {
   if (provisionMatch && method === "POST") {
     const siteId = provisionMatch[1];
     const body = await request.json().catch(() => ({}));
-    const { customDomain = "", zoneId = "" } = body;
+    const { customDomain, zoneId } = body;
 
     const site = await env.DB.prepare(
       "SELECT * FROM sites WHERE id=? AND user_id=?"
     ).bind(siteId, userId).first();
     if (!site) return err("사이트를 찾을 수 없습니다.", 404);
-    // 도메인은 호스팅 생성 후 호스팅 정보 화면에서 사용자가 직접 연결합니다.
+    if (!customDomain) return err("개인 도메인이 필요합니다.", 400);
 
     const cred = await env.DB.prepare(
       "SELECT * FROM user_credentials WHERE user_id=?"
@@ -285,7 +298,7 @@ async function handleApi(request, env, url) {
     if (!cred?.cf_global_api_key_enc || !cred?.cf_account_email)
       return err("Cloudflare Global API Key와 이메일을 먼저 등록해주세요.", 400);
     if (!cred?.cf_api_token_enc)
-      return err("Cloudflare Worker 배포용 API Token을 먼저 등록해주세요.", 400);
+      return err("Cloudflare API Token이 필요합니다. (Workers 자동 배포에 필수 — 내 계정에서 등록해주세요)", 400);
 
     const jobId = uid();
     await env.DB.prepare(
@@ -358,8 +371,7 @@ async function handleApi(request, env, url) {
         site_slug:             site.site_slug,
         site_display_name:     site.site_name,
         custom_domain:         customDomain,
-        pma_domain:            customDomain ? `pma.${customDomain}` : "",
-        workers_dev_url:       workerUrl,
+        pma_domain:            `pma.${customDomain}`,
         wp_admin_user:         wpAdminUser,
         wp_admin_pass:         wpAdminPass,
         secret_cf_account_id:  accountId,
@@ -393,16 +405,32 @@ async function handleApi(request, env, url) {
         ).run();
       }
 
-      await initWpOptions(env.DB, siteId, site.site_name, workerUrl);
+      await initWpOptions(env.DB, siteId, site.site_name, `https://${customDomain}`);
 
-      // Zone에 Worker Route 연결 (도메인이 명시된 수동 연결 또는 이전 호환 경로)
-      if (zoneId && customDomain) {
+      // Primary 도메인 바인딩 기록 (멀티 도메인 관리 화면에서 사용)
+      const existingBinding = await env.DB.prepare(
+        "SELECT id FROM site_domain_bindings WHERE hostname=?"
+      ).bind(customDomain).first();
+      if (!existingBinding) {
+        await env.DB.prepare(
+          `INSERT INTO site_domain_bindings (id,site_id,cf_zone_id,hostname,role,status)
+           VALUES (?,?,?,?,'primary','active')`
+        ).bind(uid(), siteId, zoneId || "", customDomain).run();
+      }
+
+      // Zone에 DNS 레코드 + Worker Route 연결
+      // Worker Route는 호스트명에 proxied DNS 레코드가 있어야 매칭됨
+      if (zoneId) {
+        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain).catch(e => console.error("DNS(root) 실패:", e.message));
+        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`).catch(e => console.error("DNS(www) 실패:", e.message));
+        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`).catch(e => console.error("DNS(pma) 실패:", e.message));
+
         await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName)
-          .catch(() => {});
+          .catch(e => console.error("Route(root) 실패:", e.message));
         await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName)
-          .catch(() => {});
+          .catch(e => console.error("Route(www) 실패:", e.message));
         await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}/*`, `${workerName}-pma`)
-          .catch(() => {});
+          .catch(e => console.error("Route(pma) 실패:", e.message));
       }
 
       await env.DB.prepare(
@@ -413,9 +441,9 @@ async function handleApi(request, env, url) {
         ok: true,
         workerUrl,
         githubRepo:  repoFullName,
-        customDomain: customDomain || null,
-        pmaDomain:   customDomain ? `pma.${customDomain}` : null,
-        nextStep:    "GitHub Actions가 WordPress 파일, SQLite DB, PHPLiteAdmin, Cloudflare Workers 배포까지 검증한 뒤 활성화합니다.",
+        customDomain,
+        pmaDomain:   `pma.${customDomain}`,
+        nextStep:    "GitHub Actions provision 워크플로우가 WordPress를 설치하고 있어요. 약 3~5분 후 사이트가 활성화됩니다.",
       });
     } catch (e) {
       console.error("Provision error:", e.message, e.stack);
@@ -447,6 +475,9 @@ async function handleApi(request, env, url) {
     const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
     const workerName = site.cf_worker_name;
     if (workerName) {
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain).catch(() => {});
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`).catch(() => {});
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`).catch(() => {});
       await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName).catch(() => {});
       await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName).catch(() => {});
       await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}/*`, `${workerName}-pma`).catch(() => {});
@@ -455,6 +486,224 @@ async function handleApi(request, env, url) {
       "UPDATE sites SET custom_domain=?, cf_zone_id=?, updated_at=strftime('%s','now') WHERE id=?"
     ).bind(customDomain, zoneId, siteId).run();
     return json({ ok: true, customDomain, pmaDomain: `pma.${customDomain}` });
+  }
+
+  // ── 멀티 도메인 (Primary / Alias) ────────────────────────────────────────
+  // Cloudways 스타일: 사이트 하나에 여러 도메인을 연결, 그중 하나를 Primary로 지정.
+  // Alias는 Primary로 301 리다이렉트할 수도, 별도 호스트로 그대로 서빙할 수도 있음.
+
+  const domainsListMatch = pathname.match(/^\/api\/sites\/([^/]+)\/domains$/);
+  if (domainsListMatch && method === "GET") {
+    const siteId = domainsListMatch[1];
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    const { results } = await env.DB.prepare(
+      "SELECT * FROM site_domain_bindings WHERE site_id=? ORDER BY (role='primary') DESC, created_at ASC"
+    ).bind(siteId).all();
+    return json({ domains: results || [] });
+  }
+
+  if (domainsListMatch && method === "POST") {
+    const siteId = domainsListMatch[1];
+    const { hostname, zoneId, role, redirectToPrimary } = await request.json().catch(() => ({}));
+    if (!hostname || !zoneId) return err("hostname과 zoneId가 필요합니다.");
+
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    if (!site.cf_worker_name) return err("이 사이트는 아직 프로비저닝되지 않았어요. 먼저 호스팅을 생성해주세요.", 400);
+
+    const dup = await env.DB.prepare(
+      "SELECT id FROM site_domain_bindings WHERE hostname=?"
+    ).bind(hostname).first();
+    if (dup) return err("이미 등록된 도메인이에요.", 409);
+
+    const cred = await env.DB.prepare(
+      "SELECT * FROM user_credentials WHERE user_id=?"
+    ).bind(userId).first();
+    if (!cred?.cf_global_api_key_enc) return err("Cloudflare API 키가 필요합니다.", 400);
+    const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
+
+    // 이 사이트에 기존 primary가 있는지 확인. 없으면 이번 등록을 primary로 강제.
+    const existingPrimary = await env.DB.prepare(
+      "SELECT id, hostname FROM site_domain_bindings WHERE site_id=? AND role='primary'"
+    ).bind(siteId).first();
+    const finalRole = existingPrimary ? (role === "primary" ? "alias" : (role || "alias")) : "primary";
+    const wantsRedirect = finalRole === "alias" && !!redirectToPrimary && !!existingPrimary;
+
+    let routeTarget = site.cf_worker_name;
+    try {
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, hostname);
+
+      if (wantsRedirect) {
+        // 별도의 경량 301 리다이렉트 워커를 배포하고, 그 워커로 라우트를 건다.
+        let accountId = cred.cf_account_id;
+        if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
+        const redirectWorkerName = `${site.cf_worker_name}-redir-${hostname.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`.slice(0, 63);
+        const redirectJs = buildRedirectWorkerJs(existingPrimary.hostname);
+        await cf.deployModuleWorker(cred.cf_account_email, cfKey, accountId, redirectWorkerName, redirectJs);
+        routeTarget = redirectWorkerName;
+      }
+
+      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${hostname}/*`, routeTarget);
+
+      // 이번 등록이 Primary라면 pma.{hostname}도 함께 연결
+      if (finalRole === "primary") {
+        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${hostname}`);
+        await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${hostname}/*`, `${site.cf_worker_name}-pma`).catch(() => {});
+      }
+    } catch (e) {
+      return err(`Cloudflare 설정 실패: ${e.message}`, 500);
+    }
+
+    const bindingId = uid();
+    await env.DB.prepare(
+      `INSERT INTO site_domain_bindings (id,site_id,cf_zone_id,hostname,role,redirect_to_primary,status)
+       VALUES (?,?,?,?,?,?,'active')`
+    ).bind(bindingId, siteId, zoneId, hostname, finalRole, wantsRedirect ? 1 : 0).run();
+
+    // primary로 지정된 경우 sites.custom_domain도 함께 갱신 (레거시 호환)
+    if (finalRole === "primary") {
+      await env.DB.prepare(
+        "UPDATE sites SET custom_domain=?, cf_zone_id=?, updated_at=strftime('%s','now') WHERE id=?"
+      ).bind(hostname, zoneId, siteId).run();
+    }
+
+    return json({ ok: true, id: bindingId, hostname, role: finalRole, redirecting: wantsRedirect });
+  }
+
+  const domainSetPrimaryMatch = pathname.match(/^\/api\/sites\/([^/]+)\/domains\/([^/]+)\/primary$/);
+  if (domainSetPrimaryMatch && method === "PUT") {
+    const [, siteId, bindingId] = domainSetPrimaryMatch;
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+
+    const target = await env.DB.prepare(
+      "SELECT * FROM site_domain_bindings WHERE id=? AND site_id=?"
+    ).bind(bindingId, siteId).first();
+    if (!target) return err("도메인을 찾을 수 없습니다.", 404);
+    if (target.role === "primary") return json({ ok: true, alreadyPrimary: true });
+
+    const oldPrimary = await env.DB.prepare(
+      "SELECT * FROM site_domain_bindings WHERE site_id=? AND role='primary'"
+    ).bind(siteId).first();
+
+    // 새 Primary와 (강등될) 이전 Primary 둘 다 사이트 워커로 직접 라우팅되도록 정리
+    const cred = await env.DB.prepare(
+      "SELECT * FROM user_credentials WHERE user_id=?"
+    ).bind(userId).first();
+    if (cred?.cf_global_api_key_enc && site.cf_worker_name) {
+      const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
+      for (const binding of [target, oldPrimary].filter(Boolean)) {
+        try {
+          const routes = await cf.listWorkerRoutes(cred.cf_account_email, cfKey, binding.cf_zone_id);
+          const existingRoute = routes.find(r => r.pattern === `${binding.hostname}/*`);
+          if (existingRoute) await cf.deleteWorkerRoute(cred.cf_account_email, cfKey, binding.cf_zone_id, existingRoute.id).catch(() => {});
+          await cf.addWorkerRoute(cred.cf_account_email, cfKey, binding.cf_zone_id, `${binding.hostname}/*`, site.cf_worker_name);
+        } catch (e) {
+          console.error(`Route 재설정 실패 (${binding.hostname}):`, e.message);
+        }
+      }
+    }
+
+    // 기존 primary는 alias로 강등, 대상은 primary로 승격
+    await env.DB.prepare(
+      "UPDATE site_domain_bindings SET role='alias', redirect_to_primary=0 WHERE site_id=? AND role='primary'"
+    ).bind(siteId).run();
+    await env.DB.prepare(
+      "UPDATE site_domain_bindings SET role='primary', redirect_to_primary=0 WHERE id=?"
+    ).bind(bindingId).run();
+    await env.DB.prepare(
+      "UPDATE sites SET custom_domain=?, cf_zone_id=?, updated_at=strftime('%s','now') WHERE id=?"
+    ).bind(target.hostname, target.cf_zone_id, siteId).run();
+
+    return json({ ok: true, hostname: target.hostname });
+  }
+
+  const domainBindingMatch = pathname.match(/^\/api\/sites\/([^/]+)\/domains\/([^/]+)$/);
+  if (domainBindingMatch && method === "PATCH") {
+    const [, siteId, bindingId] = domainBindingMatch;
+    const { redirectToPrimary } = await request.json().catch(() => ({}));
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    const target = await env.DB.prepare(
+      "SELECT * FROM site_domain_bindings WHERE id=? AND site_id=?"
+    ).bind(bindingId, siteId).first();
+    if (!target) return err("도메인을 찾을 수 없습니다.", 404);
+    if (target.role === "primary") return err("Primary 도메인은 리다이렉트 설정을 가질 수 없습니다.", 400);
+
+    const primary = await env.DB.prepare(
+      "SELECT hostname FROM site_domain_bindings WHERE site_id=? AND role='primary'"
+    ).bind(siteId).first();
+    const cred = await env.DB.prepare(
+      "SELECT * FROM user_credentials WHERE user_id=?"
+    ).bind(userId).first();
+
+    if (cred?.cf_global_api_key_enc && primary && site.cf_worker_name) {
+      const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
+      try {
+        const routes = await cf.listWorkerRoutes(cred.cf_account_email, cfKey, target.cf_zone_id);
+        const existingRoute = routes.find(r => r.pattern === `${target.hostname}/*`);
+
+        let newTarget = site.cf_worker_name;
+        if (redirectToPrimary) {
+          let accountId = cred.cf_account_id;
+          if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
+          const redirectWorkerName = `${site.cf_worker_name}-redir-${target.hostname.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`.slice(0, 63);
+          await cf.deployModuleWorker(cred.cf_account_email, cfKey, accountId, redirectWorkerName, buildRedirectWorkerJs(primary.hostname));
+          newTarget = redirectWorkerName;
+        }
+
+        if (existingRoute) {
+          await cf.deleteWorkerRoute(cred.cf_account_email, cfKey, target.cf_zone_id, existingRoute.id).catch(() => {});
+        }
+        await cf.addWorkerRoute(cred.cf_account_email, cfKey, target.cf_zone_id, `${target.hostname}/*`, newTarget);
+      } catch (e) {
+        return err(`Cloudflare 라우트 갱신 실패: ${e.message}`, 500);
+      }
+    }
+
+    await env.DB.prepare(
+      "UPDATE site_domain_bindings SET redirect_to_primary=? WHERE id=?"
+    ).bind(redirectToPrimary ? 1 : 0, bindingId).run();
+    return json({ ok: true });
+  }
+
+  if (domainBindingMatch && method === "DELETE") {
+    const [, siteId, bindingId] = domainBindingMatch;
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    const target = await env.DB.prepare(
+      "SELECT * FROM site_domain_bindings WHERE id=? AND site_id=?"
+    ).bind(bindingId, siteId).first();
+    if (!target) return err("도메인을 찾을 수 없습니다.", 404);
+    if (target.role === "primary") return err("Primary 도메인은 삭제할 수 없어요. 다른 도메인을 먼저 Primary로 지정해주세요.", 400);
+
+    const cred = await env.DB.prepare(
+      "SELECT * FROM user_credentials WHERE user_id=?"
+    ).bind(userId).first();
+    if (cred?.cf_global_api_key_enc) {
+      const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
+      try {
+        const routes = await cf.listWorkerRoutes(cred.cf_account_email, cfKey, target.cf_zone_id);
+        const match = routes.find(r => r.pattern === `${target.hostname}/*`);
+        if (match) await cf.deleteWorkerRoute(cred.cf_account_email, cfKey, target.cf_zone_id, match.id).catch(() => {});
+      } catch (e) {
+        console.error("Route 삭제 실패:", e.message);
+      }
+    }
+
+    await env.DB.prepare("DELETE FROM site_domain_bindings WHERE id=?").bind(bindingId).run();
+    return json({ ok: true });
   }
 
   // ── 캐시 퍼지 ─────────────────────────────────────────────────────────────
@@ -511,10 +760,7 @@ async function handleApi(request, env, url) {
     }
 
     const customDomain = site.custom_domain;
-    const pmaWorkerUrl = site.cf_worker_name && site.cf_worker_url
-      ? site.cf_worker_url.replace(`https://${site.cf_worker_name}.`, `https://${site.cf_worker_name}-pma.`)
-      : null;
-    const plaUrl   = customDomain ? `https://pma.${customDomain}` : (pmaWorkerUrl || site.tunnel_pla_url || null);
+    const plaUrl   = customDomain ? `https://pma.${customDomain}` : (site.tunnel_pla_url || null);
     const adminUrl = customDomain
       ? `https://${customDomain}/wp-admin`
       : (site.cf_worker_url ? `${site.cf_worker_url}/wp-admin` : null);
@@ -543,7 +789,6 @@ async function handleApi(request, env, url) {
         pmaDomain:    customDomain ? `pma.${customDomain}` : null,
         tunnelWpUrl:  site.cf_worker_url,
         tunnelPlaUrl: site.tunnel_pla_url,
-        pmaWorkerUrl,
       },
     });
   }
