@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS user_credentials (
   user_id TEXT PRIMARY KEY,
   github_token_enc TEXT,
+  github_token_invalid INTEGER NOT NULL DEFAULT 0,
   cf_global_api_key_enc TEXT,
   cf_api_token_enc TEXT,
   cf_account_email TEXT,
