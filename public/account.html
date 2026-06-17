@@ -40,6 +40,9 @@
           <span id="ghBadge" class="badge">확인 중</span>
         </div>
         <div class="card">
+          <div id="ghInvalidNotice" class="notice-box warn" style="display:none;margin-bottom:var(--space-4);">
+            ⚠️ 마지막 프로비저닝 시도에서 이 토큰이 GitHub에 의해 거부됐어요(만료 또는 취소). 아래에서 새 토큰으로 다시 등록해주세요.
+          </div>
           <div class="field">
             <label class="field__label">Personal Access Token</label>
             <div class="cred-row">
@@ -162,8 +165,17 @@
         const data = await wpspot.api("/api/account/credentials");
 
         // GitHub
-        setBadge("ghBadge", data.hasGithubToken);
-        document.getElementById("ghMasked").textContent = data.hasGithubToken ? "••••••••" : "(미등록)";
+        if (data.hasGithubToken && data.githubTokenInvalid) {
+          const el = document.getElementById("ghBadge");
+          el.textContent = "만료/취소됨";
+          el.className = "badge badge--missing";
+          document.getElementById("ghMasked").textContent = "•••••••• (재등록 필요)";
+          document.getElementById("ghInvalidNotice").style.display = "";
+        } else {
+          setBadge("ghBadge", data.hasGithubToken);
+          document.getElementById("ghMasked").textContent = data.hasGithubToken ? "••••••••" : "(미등록)";
+          document.getElementById("ghInvalidNotice").style.display = "none";
+        }
 
         // Cloudflare
         const cfOk = data.hasCfGlobalApiKey && !!data.cfAccountEmail;
