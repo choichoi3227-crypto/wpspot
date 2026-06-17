@@ -84,6 +84,10 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
     try {
       ghUser = await gh.getAuthenticatedUser(githubToken);
     } catch (e) {
+      // 토큰이 GitHub에 의해 거부됨 — 계정 화면에서 바로 보이도록 플래그를 세운다.
+      await env.DB.prepare(
+        "UPDATE user_credentials SET github_token_invalid=1 WHERE user_id=?"
+      ).bind(userId).run().catch(() => {});
       throw new Error(
         `GitHub 인증 실패 (${e.message}). 등록된 GitHub Token이 만료되었거나 취소됐을 수 있어요. ` +
         `내 계정 → GitHub Token에서 새 토큰을 발급받아 다시 등록해주세요.`
@@ -358,13 +362,14 @@ async function handleApi(request, env, url) {
   if (pathname === "/api/account/credentials" && method === "GET") {
     const row = await env.DB.prepare(
       `SELECT cf_account_email, cf_account_id,
-              github_token_enc, cf_global_api_key_enc, cf_api_token_enc
+              github_token_enc, github_token_invalid, cf_global_api_key_enc, cf_api_token_enc
        FROM user_credentials WHERE user_id=?`
     ).bind(userId).first();
     return json({
       cfAccountEmail: row?.cf_account_email || "",
       cfAccountId: row?.cf_account_id || "",
       hasGithubToken: !!row?.github_token_enc,
+      githubTokenInvalid: !!row?.github_token_invalid,
       hasCfGlobalApiKey: !!row?.cf_global_api_key_enc,
       hasCfApiToken: !!row?.cf_api_token_enc,
     });
@@ -411,7 +416,7 @@ async function handleApi(request, env, url) {
     ).bind(userId).first();
     if (existing) {
       const sets = [], binds = [];
-      if (githubEnc !== undefined)      { sets.push("github_token_enc=?");      binds.push(githubEnc); }
+      if (githubEnc !== undefined)      { sets.push("github_token_enc=?");      binds.push(githubEnc); sets.push("github_token_invalid=0"); }
       if (cfKeyEnc !== undefined)       { sets.push("cf_global_api_key_enc=?"); binds.push(cfKeyEnc); }
       if (cfApiTokenEnc !== undefined)  { sets.push("cf_api_token_enc=?");      binds.push(cfApiTokenEnc); }
       if (cfAccountEmail !== undefined) { sets.push("cf_account_email=?");      binds.push(cfAccountEmail); }
