@@ -169,6 +169,15 @@
 
     if (wpspot.requireAuth()) load();
 
+    let _hostingPollTimer = null;
+    function startHostingPolling() {
+      if (_hostingPollTimer) return;
+      _hostingPollTimer = setInterval(() => load(), 10000);
+    }
+    function stopHostingPolling() {
+      if (_hostingPollTimer) { clearInterval(_hostingPollTimer); _hostingPollTimer = null; }
+    }
+
     async function load() {
       const content = document.getElementById("content");
       if (!siteId) { content.innerHTML = `<div class="empty-state">사이트 ID가 없어요.</div>`; return; }
@@ -179,21 +188,70 @@
         ]);
         siteData = (sites.sites || []).find(s => s.id === siteId);
         credData = cred;
-        if (siteData) {
-          document.getElementById("siteTitle").textContent = siteData.site_name;
-          document.getElementById("siteSub").textContent = siteData.github_repo || "프로비저닝 전";
-          document.getElementById("statusBadge").innerHTML = statusBadge(siteData.status);
-        }
-        if (!cred.provisioned) {
-          content.innerHTML = `<div class="empty-state">아직 프로비저닝되지 않았어요.<br/>대시보드에서 프로비저닝을 먼저 진행해주세요.</div>`;
+        if (!siteData) {
+          content.innerHTML = `<div class="empty-state">사이트를 찾을 수 없어요.</div>`;
           return;
         }
-        content.innerHTML = render(cred, siteData);
+        document.getElementById("siteTitle").textContent = siteData.site_name;
+        document.getElementById("siteSub").textContent = siteData.github_repo || "프로비저닝 전";
+        document.getElementById("statusBadge").innerHTML = statusBadge(siteData.status);
+
+        // 도메인 관리 카드는 프로비저닝 여부와 무관하게 항상 노출.
+        // 도메인을 먼저 정해야 프로비저닝이 가능한 구조이므로, 이 화면은 "사이트가 있으면" 바로 열려야 함.
+        content.innerHTML = renderDomainCard(siteData) + (cred.provisioned ? render(cred, siteData) : renderNotProvisionedNotice(siteData));
         bindEvents();
         loadDomains();
+
+        if (siteData.status === "provisioning") {
+          startHostingPolling();
+        } else {
+          stopHostingPolling();
+        }
       } catch (e) {
         content.innerHTML = `<div class="empty-state">${wpspot.escapeHtml(e.message)}</div>`;
       }
+    }
+
+    function renderNotProvisionedNotice(site) {
+      const hasDomain = !!site?.custom_domain;
+      return `
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">⏳</div>
+            <div>
+              <div class="info-card__title">WordPress 준비 중</div>
+              <div class="info-card__subtitle">아직 프로비저닝되지 않았어요</div>
+            </div>
+          </div>
+          ${hasDomain ? `
+            <div class="notice-box info">
+              위에서 도메인이 연결됐어요. 잠시 후 자동으로 프로비저닝이 시작돼요(또는 대시보드에서 "프로비저닝 시작"을 눌러주세요). WordPress 관리자 정보, PHPLiteAdmin 접속 정보는 완료 후 여기에 표시됩니다.
+            </div>` : `
+            <div class="notice-box warn">
+              먼저 위의 "도메인 관리" 카드에서 Primary 도메인을 연결해주세요. 도메인이 연결되면 프로비저닝이 시작되고, WordPress가 준비되면 관리자 정보가 여기에 표시돼요.
+            </div>`}
+        </div>
+      `;
+    }
+
+    function renderDomainCard(site) {
+      return `
+        <!-- ── 도메인 관리 (항상 노출) ── -->
+        <div class="info-card">
+          <div class="info-card__header">
+            <div class="info-card__icon">🌐</div>
+            <div>
+              <div class="info-card__title">도메인 관리</div>
+              <div class="info-card__subtitle">Primary 도메인 1개 + Alias 도메인 다중 연결</div>
+            </div>
+            <button class="action-btn action-btn--primary" style="margin-left:auto;font-size:var(--fs-body-3);" onclick="openDomainModal()">+ 도메인 추가</button>
+          </div>
+
+          <div id="domainListArea">
+            <div class="empty-state" style="padding:var(--space-6);">불러오는 중…</div>
+          </div>
+        </div>
+      `;
     }
 
     function statusBadge(status) {
@@ -225,38 +283,6 @@
       const adminUrl = wp.adminUrl || (customDomain ? `https://${customDomain}/wp-admin` : (nginx.workerUrl ? `${nginx.workerUrl}/wp-admin` : null));
 
       return `
-        <!-- ── 도메인 / 접속 현황 ── -->
-        <div class="info-card">
-          <div class="info-card__header">
-            <div class="info-card__icon">🌐</div>
-            <div>
-              <div class="info-card__title">도메인 관리</div>
-              <div class="info-card__subtitle">Primary 도메인 1개 + Alias 도메인 다중 연결</div>
-            </div>
-            <button class="action-btn action-btn--primary" style="margin-left:auto;font-size:var(--fs-body-3);" onclick="openDomainModal()">+ 도메인 추가</button>
-          </div>
-
-          <div id="domainListArea">
-            <div class="empty-state" style="padding:var(--space-6);">불러오는 중…</div>
-          </div>
-
-          ${!customDomain && nginx.workerUrl ? `
-            <hr class="divider" />
-            <div class="field-row">
-              <span class="field-label">임시 URL</span>
-              ${fvLink(nginx.workerUrl, nginx.workerUrl)}
-              <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(nginx.workerUrl)}')">복사</button>
-            </div>` : ""}
-
-          ${adminUrl ? `
-            <hr class="divider" />
-            <div class="field-row">
-              <span class="field-label">WP 관리자</span>
-              ${fvLink(adminUrl, adminUrl)}
-              <a class="action-btn action-btn--secondary" href="${wpspot.escapeHtml(adminUrl)}" target="_blank">열기 ↗</a>
-            </div>` : ""}
-        </div>
-
         <!-- ── WordPress 관리자 정보 ── -->
         <div class="info-card">
           <div class="info-card__header">
@@ -267,6 +293,19 @@
             </div>
             ${statusBadge(nginx.status || 'pending')}
           </div>
+
+          ${adminUrl ? `
+            <div class="field-row">
+              <span class="field-label">관리자 URL</span>
+              ${fvLink(adminUrl, adminUrl)}
+              <a class="action-btn action-btn--secondary" href="${wpspot.escapeHtml(adminUrl)}" target="_blank">열기 ↗</a>
+            </div>` : ""}
+          ${!customDomain && nginx.workerUrl ? `
+            <div class="field-row">
+              <span class="field-label">임시 URL</span>
+              ${fvLink(nginx.workerUrl, nginx.workerUrl)}
+              <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(nginx.workerUrl)}')">복사</button>
+            </div>` : ""}
 
           <div class="field-row">
             <span class="field-label">아이디</span>
@@ -384,7 +423,7 @@
               📁 파일 관리자
             </a>
             <a class="action-btn action-btn--secondary" href="/domains.html">
-              🌐 도메인 관리
+              🌐 Cloudflare 도메인 등록/관리
             </a>
             ${customDomain ? `
               <a class="action-btn action-btn--secondary" href="/dns.html?zone=${wpspot.escapeHtml(site?.cf_zone_id || '')}&domain=${wpspot.escapeHtml(customDomain)}">
@@ -592,7 +631,9 @@
           body: JSON.stringify({ hostname, zoneId, role: hasPrimary ? "alias" : "primary", redirectToPrimary }),
         });
         closeModal();
-        wpspot.toast(`${hostname} 도메인이 연결됐어요 ✓`);
+        wpspot.toast(hasPrimary
+          ? `${hostname} 도메인이 연결됐어요 ✓`
+          : `${hostname} 연결 완료! 프로비저닝을 시작했어요 (~3~5분 소요)`);
         load();
       } catch (e) {
         errEl.textContent = e.message;
