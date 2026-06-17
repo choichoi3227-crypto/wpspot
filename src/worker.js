@@ -41,6 +41,196 @@ function buildRedirectWorkerJs(targetHostname) {
 };`;
 }
 
+// 사이트에 도메인을 연결하고 GitHub Actions 프로비저닝을 시작한다.
+// /api/sites/:id/provision 과 /api/sites/:id/domains(Primary 최초 등록) 양쪽에서 공유.
+async function provisionSite(env, userId, site, customDomain, zoneId) {
+  const siteId = site.id;
+  const cred = await env.DB.prepare(
+    "SELECT * FROM user_credentials WHERE user_id=?"
+  ).bind(userId).first();
+  if (!cred?.github_token_enc)
+    return err("GitHub Token을 먼저 등록해주세요.", 400);
+  if (!cred?.cf_global_api_key_enc || !cred?.cf_account_email)
+    return err("Cloudflare Global API Key와 이메일을 먼저 등록해주세요.", 400);
+  if (!cred?.cf_api_token_enc)
+    return err("Cloudflare API Token이 필요합니다. (Workers 자동 배포에 필수 — 내 계정에서 등록해주세요)", 400);
+
+  const jobId = uid();
+  await env.DB.prepare(
+    "INSERT INTO site_jobs (id,site_id,job_type,status) VALUES (?,?,'provision','running')"
+  ).bind(jobId, siteId).run();
+  await env.DB.prepare(
+    "UPDATE sites SET status='provisioning', custom_domain=?, cf_zone_id=?, updated_at=strftime('%s','now') WHERE id=?"
+  ).bind(customDomain, zoneId || null, siteId).run();
+
+  try {
+    const githubToken = await decryptSecret(env, cred.github_token_enc);
+    const cfKey       = await decryptSecret(env, cred.cf_global_api_key_enc);
+    const cfApiToken  = cred.cf_api_token_enc
+      ? await decryptSecret(env, cred.cf_api_token_enc).catch(() => "")
+      : "";
+
+    // CF Account ID 확보
+    let accountId = cred.cf_account_id;
+    if (!accountId) {
+      accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
+      await env.DB.prepare(
+        "UPDATE user_credentials SET cf_account_id=? WHERE user_id=?"
+      ).bind(accountId, userId).run();
+    }
+
+    // GitHub 레포 생성
+    let ghUser;
+    try {
+      ghUser = await gh.getAuthenticatedUser(githubToken);
+    } catch (e) {
+      throw new Error(
+        `GitHub 인증 실패 (${e.message}). 등록된 GitHub Token이 만료되었거나 취소됐을 수 있어요. ` +
+        `내 계정 → GitHub Token에서 새 토큰을 발급받아 다시 등록해주세요.`
+      );
+    }
+    const repoName = `wpspot-${site.site_slug}`;
+    await gh.createRepo(githubToken, repoName);
+    const repoFullName = `${ghUser.login}/${repoName}`;
+
+    // CF Worker subdomain — workers.dev 서브도메인은 "임시 접속 URL" 표시용일 뿐,
+    // Worker 자체는 Worker Route(커스텀 도메인)로도 충분히 서빙되므로 실패해도 진행한다.
+    // (사용자마다 workers.dev 서브도메인을 설정해두지 않은 경우가 흔하므로, 이를 필수로 막으면 안 됨)
+    const workerName = `wpspot-${site.site_slug}`;
+    let workerUrl = null;
+    try {
+      const workerSubdomain = await cf.getWorkerSubdomain(cred.cf_account_email, cfKey, accountId);
+      workerUrl = `https://${workerName}.${workerSubdomain}.workers.dev`;
+    } catch (e) {
+      console.error("workers.dev 서브도메인 조회 실패(건너뜀, 커스텀 도메인으로 계속 진행):", e.message);
+    }
+
+    // 사용자 자격증명 생성
+    const wpAdminUser    = generateUsername();
+    const wpAdminPass    = generatePassword();
+    const plaPass        = generatePassword();
+    const plaPassHash    = await hashPassword(plaPass);
+    const plaPassEnc     = await encryptSecret(env, plaPass);
+    const wpAdminPassEnc = await encryptSecret(env, wpAdminPass);
+
+    // 콜백용 단기 JWT (사이트 ID 포함, 1시간)
+    const callbackJwt = await signJWT(
+      { sub: userId, siteId, callback: true },
+      env.JWT_SECRET,
+      3600
+    );
+    const callbackUrl = `${env.WPSPOT_BASE_URL || "https://wpspot.workers.dev"}/api/callback/tunnel`;
+
+    // 워크플로우 파일 로드
+    const [provisionYml, keepaliveYml] = await Promise.all([
+      env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
+        .then(r => r.ok ? r.text() : Promise.reject(new Error("provision.yml 로드 실패"))),
+      env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/nginx-keepalive.yml"))
+        .then(r => r.ok ? r.text() : "").catch(() => ""),
+    ]);
+
+    // 초기 커밋 (워크플로우 + 빈 deploy 디렉토리 placeholder)
+    const { defaultBranch } = await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
+      { path: ".github/workflows/provision.yml",       content: provisionYml },
+      { path: ".github/workflows/nginx-keepalive.yml", content: keepaliveYml || "# keepalive" },
+      { path: "deploy/.gitkeep",                       content: "" },
+      { path: "deploy/.worker_name",                   content: workerName },
+    ], "chore: initial wpspot setup");
+
+    await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", defaultBranch, {
+      site_slug:             site.site_slug,
+      site_display_name:     site.site_name,
+      custom_domain:         customDomain,
+      pma_domain:            `pma.${customDomain}`,
+      wp_admin_user:         wpAdminUser,
+      wp_admin_pass:         wpAdminPass,
+      secret_cf_account_id:  accountId,
+      secret_cf_api_token:   cfApiToken,
+      secret_github_token:   githubToken,
+      secret_worker_name:    workerName,
+      wpspot_callback_url:   callbackUrl,
+      wpspot_site_id:        siteId,
+      wpspot_jwt:            callbackJwt,
+    });
+
+    // DB 업데이트
+    await env.DB.prepare(
+      `UPDATE sites SET github_repo=?, cf_worker_url=?, cf_worker_name=?,
+       updated_at=strftime('%s','now') WHERE id=?`
+    ).bind(repoFullName, workerUrl, workerName, siteId).run();
+
+    const existingCred = await env.DB.prepare(
+      "SELECT site_id FROM site_credentials WHERE site_id=?"
+    ).bind(siteId).first();
+    if (!existingCred) {
+      await env.DB.prepare(
+        `INSERT INTO site_credentials
+         (site_id,pla_username,pla_password_hash,pla_password_plain_enc,
+          wp_admin_username,wp_admin_password_plain_enc,db_path,nginx_status)
+         VALUES (?,?,?,?,?,?,?,'provisioning')`
+      ).bind(
+        siteId, "admin", plaPassHash, plaPassEnc,
+        wpAdminUser, wpAdminPassEnc,
+        "wp-content/database/wordpress.db"
+      ).run();
+    }
+
+    await initWpOptions(env.DB, siteId, site.site_name, `https://${customDomain}`);
+
+    // Primary 도메인 바인딩 기록 (멀티 도메인 관리 화면에서 사용)
+    const existingBinding = await env.DB.prepare(
+      "SELECT id FROM site_domain_bindings WHERE hostname=?"
+    ).bind(customDomain).first();
+    if (!existingBinding) {
+      await env.DB.prepare(
+        `INSERT INTO site_domain_bindings (id,site_id,cf_zone_id,hostname,role,status)
+         VALUES (?,?,?,?,'primary','active')`
+      ).bind(uid(), siteId, zoneId || "", customDomain).run();
+    } else {
+      await env.DB.prepare(
+        "UPDATE site_domain_bindings SET status='active', cf_zone_id=? WHERE hostname=?"
+      ).bind(zoneId || "", customDomain).run();
+    }
+
+    // Zone에 DNS 레코드 + Worker Route 연결
+    // Worker Route는 호스트명에 proxied DNS 레코드가 있어야 매칭됨
+    if (zoneId) {
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain).catch(e => console.error("DNS(root) 실패:", e.message));
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`).catch(e => console.error("DNS(www) 실패:", e.message));
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`).catch(e => console.error("DNS(pma) 실패:", e.message));
+
+      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName)
+        .catch(e => console.error("Route(root) 실패:", e.message));
+      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName)
+        .catch(e => console.error("Route(www) 실패:", e.message));
+      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}/*`, `${workerName}-pma`)
+        .catch(e => console.error("Route(pma) 실패:", e.message));
+    }
+
+    await env.DB.prepare(
+      "UPDATE site_jobs SET status='success', message=?, finished_at=strftime('%s','now') WHERE id=?"
+    ).bind("프로비저닝 요청 완료. GitHub Actions가 실행 중이에요.", jobId).run();
+
+    return json({
+      ok: true,
+      workerUrl,
+      githubRepo:  repoFullName,
+      customDomain,
+      pmaDomain:   `pma.${customDomain}`,
+      nextStep:    "GitHub Actions provision 워크플로우가 WordPress를 설치하고 있어요. 약 3~5분 후 사이트가 활성화됩니다.",
+    });
+  } catch (e) {
+    console.error("Provision error:", e.message, e.stack);
+    await env.DB.prepare(
+      "UPDATE sites SET status='error', updated_at=strftime('%s','now') WHERE id=?"
+    ).bind(siteId).run();
+    await env.DB.prepare(
+      "UPDATE site_jobs SET status='failed', message=?, finished_at=strftime('%s','now') WHERE id=?"
+    ).bind(String(e.message).slice(0, 500), jobId).run();
+    return err(`프로비저닝 실패: ${e.message}`, 500);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -183,6 +373,36 @@ async function handleApi(request, env, url) {
   if (pathname === "/api/account/credentials" && method === "PUT") {
     const body = await request.json().catch(() => ({}));
     const { githubToken, cfGlobalApiKey, cfAccountEmail, cfAccountId, cfApiToken } = body;
+
+    // GitHub Token은 저장 전에 실제로 유효한지 검증 — 프로비저닝 시점이 아니라
+    // 등록 시점에 401/스코프 문제를 바로 알려줘야 함.
+    if (githubToken) {
+      let ghUser;
+      try {
+        ghUser = await gh.getAuthenticatedUser(githubToken);
+        if (!ghUser?.login) throw new Error("사용자 정보를 확인할 수 없습니다.");
+      } catch (e) {
+        return err(
+          `GitHub Token이 유효하지 않아요: ${e.message}. ` +
+          `Settings → Developer settings → Personal access tokens에서 토큰이 만료되지 않았는지, ` +
+          `"repo" 권한(Classic) 또는 "Contents: Read and write" + "Administration: Read and write"(Fine-grained) ` +
+          `권한이 포함되어 있는지 확인해주세요.`,
+          400
+        );
+      }
+      // Classic PAT인 경우 repo/workflow 스코프 확인 (Fine-grained PAT는 _scopes가 빈 배열이라 건너뜀)
+      if (ghUser._scopes?.length) {
+        const missing = ["repo", "workflow"].filter(s => !ghUser._scopes.includes(s));
+        if (missing.length) {
+          return err(
+            `GitHub Token에 ${missing.map(s => `"${s}"`).join(", ")} 권한이 없어요(현재 권한: ${ghUser._scopes.join(", ") || "없음"}). ` +
+            `레포 생성과 워크플로우 실행을 위해 해당 스코프를 추가해서 다시 등록해주세요.`,
+            400
+          );
+        }
+      }
+    }
+
     const githubEnc       = githubToken    ? await encryptSecret(env, githubToken)    : undefined;
     const cfKeyEnc        = cfGlobalApiKey ? await encryptSecret(env, cfGlobalApiKey) : undefined;
     const cfApiTokenEnc   = cfApiToken     ? await encryptSecret(env, cfApiToken)     : undefined;
@@ -283,178 +503,12 @@ async function handleApi(request, env, url) {
     const siteId = provisionMatch[1];
     const body = await request.json().catch(() => ({}));
     const { customDomain, zoneId } = body;
-
     const site = await env.DB.prepare(
       "SELECT * FROM sites WHERE id=? AND user_id=?"
     ).bind(siteId, userId).first();
     if (!site) return err("사이트를 찾을 수 없습니다.", 404);
     if (!customDomain) return err("개인 도메인이 필요합니다.", 400);
-
-    const cred = await env.DB.prepare(
-      "SELECT * FROM user_credentials WHERE user_id=?"
-    ).bind(userId).first();
-    if (!cred?.github_token_enc)
-      return err("GitHub Token을 먼저 등록해주세요.", 400);
-    if (!cred?.cf_global_api_key_enc || !cred?.cf_account_email)
-      return err("Cloudflare Global API Key와 이메일을 먼저 등록해주세요.", 400);
-    if (!cred?.cf_api_token_enc)
-      return err("Cloudflare API Token이 필요합니다. (Workers 자동 배포에 필수 — 내 계정에서 등록해주세요)", 400);
-
-    const jobId = uid();
-    await env.DB.prepare(
-      "INSERT INTO site_jobs (id,site_id,job_type,status) VALUES (?,?,'provision','running')"
-    ).bind(jobId, siteId).run();
-    await env.DB.prepare(
-      "UPDATE sites SET status='provisioning', custom_domain=?, cf_zone_id=?, updated_at=strftime('%s','now') WHERE id=?"
-    ).bind(customDomain, zoneId || null, siteId).run();
-
-    try {
-      const githubToken = await decryptSecret(env, cred.github_token_enc);
-      const cfKey       = await decryptSecret(env, cred.cf_global_api_key_enc);
-      const cfApiToken  = cred.cf_api_token_enc
-        ? await decryptSecret(env, cred.cf_api_token_enc).catch(() => "")
-        : "";
-
-      // CF Account ID 확보
-      let accountId = cred.cf_account_id;
-      if (!accountId) {
-        accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
-        await env.DB.prepare(
-          "UPDATE user_credentials SET cf_account_id=? WHERE user_id=?"
-        ).bind(accountId, userId).run();
-      }
-
-      // GitHub 레포 생성
-      const ghUser   = await gh.getAuthenticatedUser(githubToken);
-      const repoName = `wpspot-${site.site_slug}`;
-      await gh.createRepo(githubToken, repoName);
-      const repoFullName = `${ghUser.login}/${repoName}`;
-
-      // CF Worker subdomain
-      const workerSubdomain = await cf.getWorkerSubdomain(cred.cf_account_email, cfKey, accountId);
-      const workerName      = `wpspot-${site.site_slug}`;
-      const workerUrl       = `https://${workerName}.${workerSubdomain}.workers.dev`;
-
-      // 사용자 자격증명 생성
-      const wpAdminUser    = generateUsername();
-      const wpAdminPass    = generatePassword();
-      const plaPass        = generatePassword();
-      const plaPassHash    = await hashPassword(plaPass);
-      const plaPassEnc     = await encryptSecret(env, plaPass);
-      const wpAdminPassEnc = await encryptSecret(env, wpAdminPass);
-
-      // 콜백용 단기 JWT (사이트 ID 포함, 1시간)
-      const callbackJwt = await signJWT(
-        { sub: userId, siteId, callback: true },
-        env.JWT_SECRET,
-        3600
-      );
-      const callbackUrl = `${env.WPSPOT_BASE_URL || "https://wpspot.workers.dev"}/api/callback/tunnel`;
-
-      // 워크플로우 파일 로드
-      const [provisionYml, keepaliveYml] = await Promise.all([
-        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/provision.yml"))
-          .then(r => r.ok ? r.text() : Promise.reject(new Error("provision.yml 로드 실패"))),
-        env.ASSETS.fetch(new Request("https://wpspot.app/_internal/workflows/nginx-keepalive.yml"))
-          .then(r => r.ok ? r.text() : "").catch(() => ""),
-      ]);
-
-      // 초기 커밋 (워크플로우 + 빈 deploy 디렉토리 placeholder)
-      const { defaultBranch } = await gh.createInitialCommit(githubToken, ghUser.login, repoName, [
-        { path: ".github/workflows/provision.yml",       content: provisionYml },
-        { path: ".github/workflows/nginx-keepalive.yml", content: keepaliveYml || "# keepalive" },
-        { path: "deploy/.gitkeep",                       content: "" },
-        { path: "deploy/.worker_name",                   content: workerName },
-      ], "chore: initial wpspot setup");
-
-      await gh.dispatchWorkflow(githubToken, ghUser.login, repoName, "provision.yml", defaultBranch, {
-        site_slug:             site.site_slug,
-        site_display_name:     site.site_name,
-        custom_domain:         customDomain,
-        pma_domain:            `pma.${customDomain}`,
-        wp_admin_user:         wpAdminUser,
-        wp_admin_pass:         wpAdminPass,
-        secret_cf_account_id:  accountId,
-        secret_cf_api_token:   cfApiToken,
-        secret_github_token:   githubToken,
-        secret_worker_name:    workerName,
-        wpspot_callback_url:   callbackUrl,
-        wpspot_site_id:        siteId,
-        wpspot_jwt:            callbackJwt,
-      });
-
-      // DB 업데이트
-      await env.DB.prepare(
-        `UPDATE sites SET github_repo=?, cf_worker_url=?, cf_worker_name=?,
-         updated_at=strftime('%s','now') WHERE id=?`
-      ).bind(repoFullName, workerUrl, workerName, siteId).run();
-
-      const existingCred = await env.DB.prepare(
-        "SELECT site_id FROM site_credentials WHERE site_id=?"
-      ).bind(siteId).first();
-      if (!existingCred) {
-        await env.DB.prepare(
-          `INSERT INTO site_credentials
-           (site_id,pla_username,pla_password_hash,pla_password_plain_enc,
-            wp_admin_username,wp_admin_password_plain_enc,db_path,nginx_status)
-           VALUES (?,?,?,?,?,?,?,'provisioning')`
-        ).bind(
-          siteId, "admin", plaPassHash, plaPassEnc,
-          wpAdminUser, wpAdminPassEnc,
-          "wp-content/database/wordpress.db"
-        ).run();
-      }
-
-      await initWpOptions(env.DB, siteId, site.site_name, `https://${customDomain}`);
-
-      // Primary 도메인 바인딩 기록 (멀티 도메인 관리 화면에서 사용)
-      const existingBinding = await env.DB.prepare(
-        "SELECT id FROM site_domain_bindings WHERE hostname=?"
-      ).bind(customDomain).first();
-      if (!existingBinding) {
-        await env.DB.prepare(
-          `INSERT INTO site_domain_bindings (id,site_id,cf_zone_id,hostname,role,status)
-           VALUES (?,?,?,?,'primary','active')`
-        ).bind(uid(), siteId, zoneId || "", customDomain).run();
-      }
-
-      // Zone에 DNS 레코드 + Worker Route 연결
-      // Worker Route는 호스트명에 proxied DNS 레코드가 있어야 매칭됨
-      if (zoneId) {
-        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain).catch(e => console.error("DNS(root) 실패:", e.message));
-        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`).catch(e => console.error("DNS(www) 실패:", e.message));
-        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`).catch(e => console.error("DNS(pma) 실패:", e.message));
-
-        await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName)
-          .catch(e => console.error("Route(root) 실패:", e.message));
-        await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName)
-          .catch(e => console.error("Route(www) 실패:", e.message));
-        await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}/*`, `${workerName}-pma`)
-          .catch(e => console.error("Route(pma) 실패:", e.message));
-      }
-
-      await env.DB.prepare(
-        "UPDATE site_jobs SET status='success', message=?, finished_at=strftime('%s','now') WHERE id=?"
-      ).bind("프로비저닝 요청 완료. GitHub Actions가 실행 중이에요.", jobId).run();
-
-      return json({
-        ok: true,
-        workerUrl,
-        githubRepo:  repoFullName,
-        customDomain,
-        pmaDomain:   `pma.${customDomain}`,
-        nextStep:    "GitHub Actions provision 워크플로우가 WordPress를 설치하고 있어요. 약 3~5분 후 사이트가 활성화됩니다.",
-      });
-    } catch (e) {
-      console.error("Provision error:", e.message, e.stack);
-      await env.DB.prepare(
-        "UPDATE sites SET status='error', updated_at=strftime('%s','now') WHERE id=?"
-      ).bind(siteId).run();
-      await env.DB.prepare(
-        "UPDATE site_jobs SET status='failed', message=?, finished_at=strftime('%s','now') WHERE id=?"
-      ).bind(String(e.message).slice(0, 500), jobId).run();
-      return err(`프로비저닝 실패: ${e.message}`, 500);
-    }
+    return await provisionSite(env, userId, site, customDomain, zoneId);
   }
 
   // ── 도메인 연결 ───────────────────────────────────────────────────────────
@@ -514,12 +568,27 @@ async function handleApi(request, env, url) {
       "SELECT * FROM sites WHERE id=? AND user_id=?"
     ).bind(siteId, userId).first();
     if (!site) return err("사이트를 찾을 수 없습니다.", 404);
-    if (!site.cf_worker_name) return err("이 사이트는 아직 프로비저닝되지 않았어요. 먼저 호스팅을 생성해주세요.", 400);
 
     const dup = await env.DB.prepare(
       "SELECT id FROM site_domain_bindings WHERE hostname=?"
     ).bind(hostname).first();
     if (dup) return err("이미 등록된 도메인이에요.", 409);
+
+    // 이 사이트에 기존 primary가 있는지 확인. 없으면 이번 등록을 primary로 강제.
+    const existingPrimary = await env.DB.prepare(
+      "SELECT id, hostname FROM site_domain_bindings WHERE site_id=? AND role='primary'"
+    ).bind(siteId).first();
+    const finalRole = existingPrimary ? (role === "primary" ? "alias" : (role || "alias")) : "primary";
+
+    // 아직 프로비저닝되지 않은 사이트에 Primary 도메인을 처음 연결하는 경우:
+    // 도메인을 먼저 정해야 프로비저닝이 시작되는 구조이므로, 여기서 바로 전체 프로비저닝을 트리거한다.
+    // (Worker Route를 미리 걸 대상 워커 자체가 아직 없기 때문에, 따로 라우트만 거는 게 불가능함)
+    if (finalRole === "primary" && !site.cf_worker_name) {
+      const result = await provisionSite(env, userId, site, hostname, zoneId);
+      return result; // provisionSite가 site_domain_bindings까지 함께 기록함
+    }
+
+    if (!site.cf_worker_name) return err("이 사이트는 아직 프로비저닝되지 않았어요. 먼저 Primary 도메인을 연결해주세요.", 400);
 
     const cred = await env.DB.prepare(
       "SELECT * FROM user_credentials WHERE user_id=?"
@@ -527,11 +596,6 @@ async function handleApi(request, env, url) {
     if (!cred?.cf_global_api_key_enc) return err("Cloudflare API 키가 필요합니다.", 400);
     const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
 
-    // 이 사이트에 기존 primary가 있는지 확인. 없으면 이번 등록을 primary로 강제.
-    const existingPrimary = await env.DB.prepare(
-      "SELECT id, hostname FROM site_domain_bindings WHERE site_id=? AND role='primary'"
-    ).bind(siteId).first();
-    const finalRole = existingPrimary ? (role === "primary" ? "alias" : (role || "alias")) : "primary";
     const wantsRedirect = finalRole === "alias" && !!redirectToPrimary && !!existingPrimary;
 
     let routeTarget = site.cf_worker_name;
