@@ -90,17 +90,29 @@ jobs:
 
       - name: WP-CLI 설치
         run: |
-          curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+          curl -sSL -f https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
             -o /usr/local/bin/wp
+          if [ ! -s /usr/local/bin/wp ]; then
+            echo "::error::WP-CLI 다운로드 실패 (빈 파일)"
+            exit 1
+          fi
           chmod +x /usr/local/bin/wp
           wp --info --allow-root
 
       - name: WordPress 최신 버전 다운로드
         run: |
           if [ ! -f wordpress/wp-load.php ]; then
-            curl -sSL https://wordpress.org/latest.tar.gz -o /tmp/wp.tar.gz
+            curl -sSL -f https://wordpress.org/latest.tar.gz -o /tmp/wp.tar.gz
+            if [ ! -s /tmp/wp.tar.gz ]; then
+              echo "::error::WordPress 다운로드 실패 (빈 파일)"
+              exit 1
+            fi
             tar -xzf /tmp/wp.tar.gz -C .
             rm /tmp/wp.tar.gz
+          fi
+          if [ ! -f wordpress/wp-load.php ]; then
+            echo "::error::WordPress 압축 해제 후 wp-load.php를 찾을 수 없습니다."
+            exit 1
           fi
           php -r "include 'wordpress/wp-includes/version.php'; echo 'WP ' . \$wp_version . PHP_EOL;"
 
@@ -108,11 +120,20 @@ jobs:
         run: |
           mkdir -p wordpress/wp-content/plugins wordpress/wp-content/database
           if [ ! -d "wordpress/wp-content/plugins/sqlite-database-integration" ]; then
-            curl -sSL \
+            curl -sSL -f \
               "https://downloads.wordpress.org/plugin/sqlite-database-integration.latest-stable.zip" \
               -o /tmp/sqlite.zip
+            if [ ! -s /tmp/sqlite.zip ]; then
+              echo "::error::SQLite 플러그인 다운로드 실패 (빈 파일)"
+              exit 1
+            fi
             unzip -q /tmp/sqlite.zip -d wordpress/wp-content/plugins/
             rm /tmp/sqlite.zip
+          fi
+          if [ ! -f "wordpress/wp-content/plugins/sqlite-database-integration/db.copy" ]; then
+            echo "::error::db.copy 파일을 찾을 수 없습니다. 플러그인 압축 구조가 변경되었을 수 있습니다."
+            find wordpress/wp-content/plugins/sqlite-database-integration -maxdepth 1
+            exit 1
           fi
           if [ ! -f "wordpress/wp-content/db.php" ]; then
             cp wordpress/wp-content/plugins/sqlite-database-integration/db.copy \
@@ -120,50 +141,55 @@ jobs:
           fi
           echo "SQLite 플러그인 준비 완료"
 
-      # ── PHPLiteAdmin 최신 버전 설치 ─────────────────────────────────────
+      # ── PHPLiteAdmin 설치 ────────────────────────────────────────────────
+      # 공식 레포는 phpLiteAdmin/pla (phpLiteAdmin/phpLiteAdmin은 존재하지 않음),
+      # GitHub Releases가 없고, 단일 파일 phpliteadmin.php도 없음 (build.php로 빌드해야 생성됨).
+      # 따라서 index.php + classes/ + languages/ 구조를 그대로 받아 index.php를 진입점으로 사용.
       - name: PHPLiteAdmin 설치
         run: |
           PLA_DIR="wordpress/wp-content/phpliteadmin"
-          mkdir -p "$PLA_DIR"
-          if [ ! -f "$PLA_DIR/phpliteadmin.php" ]; then
-            PLA_VER=$(curl -sf \
-              "https://api.github.com/repos/phpLiteAdmin/phpLiteAdmin/releases/latest" \
-              | python3 -c \
-                "import sys,json; print(json.load(sys.stdin).get('tag_name','v1.9.9'))" \
-              2>/dev/null || echo "v1.9.9")
-            echo "PHPLiteAdmin 버전: $PLA_VER"
-            curl -sSL \
-              "https://github.com/phpLiteAdmin/phpLiteAdmin/archive/refs/tags/${PLA_VER}.zip" \
-              -o /tmp/pla.zip 2>/dev/null || \
-            curl -sSL \
-              "https://github.com/phpLiteAdmin/phpLiteAdmin/archive/refs/heads/master.zip" \
-              -o /tmp/pla.zip
-            unzip -q /tmp/pla.zip -d /tmp/pla_src/
-            PLAFILE=$(find /tmp/pla_src/ -name "phpliteadmin.php" | head -1)
-            if [ -n "$PLAFILE" ]; then
-              cp "$PLAFILE" "$PLA_DIR/phpliteadmin.php"
-            else
-              curl -sSL \
-                "https://raw.githubusercontent.com/phpLiteAdmin/phpLiteAdmin/master/phpliteadmin.php" \
-                -o "$PLA_DIR/phpliteadmin.php"
+          if [ ! -f "$PLA_DIR/index.php" ]; then
+            mkdir -p "$PLA_DIR"
+            rm -f /tmp/pla.tar.gz
+            curl -sSL -f \
+              "https://github.com/phpLiteAdmin/pla/archive/refs/heads/master.tar.gz" \
+              -o /tmp/pla.tar.gz
+            if [ ! -s /tmp/pla.tar.gz ]; then
+              echo "::error::PHPLiteAdmin 다운로드 실패 (빈 파일)"
+              exit 1
             fi
-            rm -rf /tmp/pla.zip /tmp/pla_src/
-          fi
+            rm -rf /tmp/pla_src && mkdir -p /tmp/pla_src
+            tar -xzf /tmp/pla.tar.gz -C /tmp/pla_src --strip-components=1
+            rm -f /tmp/pla.tar.gz
 
-          # PHPLiteAdmin 설정 패치: DB 경로 지정, 비밀번호 비활성화 (CF Worker 레벨에서 인증)
+            if [ ! -f "/tmp/pla_src/index.php" ]; then
+              echo "::error::PHPLiteAdmin 압축 해제 후 index.php를 찾을 수 없습니다."
+              find /tmp/pla_src -maxdepth 1
+              exit 1
+            fi
+
+            cp -r /tmp/pla_src/. "$PLA_DIR/"
+            rm -rf /tmp/pla_src
+          fi
+          ls -lh "$PLA_DIR/index.php"
+
+          # PHPLiteAdmin 설정: 공식적으로 지원되는 외부 설정 파일(phpliteadmin.config.php) 사용.
+          # phpliteadmin.php 소스를 직접 정규식으로 패치하는 방식은 깨지기 쉽고,
+          # 애초에 이 레포에는 단일 phpliteadmin.php 파일이 존재하지 않음(index.php가 진입점).
           DB_ABS="$(pwd)/wordpress/wp-content/database"
-          python3 - "$PLA_DIR/phpliteadmin.php" "$DB_ABS" << 'PYEOF'
-          import sys, re
-          fpath, db_dir = sys.argv[1], sys.argv[2]
-          with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
-              src = f.read()
-          src = re.sub(r"\\\$directory\s*=\s*['\"].*?['\"]", f"$directory = '{db_dir}'", src)
-          src = re.sub(r"\\\$password\s*=\s*['\"].*?['\"]", "$password = ''", src)
-          with open(fpath, 'w', encoding='utf-8') as f:
-              f.write(src)
-          print("PHPLiteAdmin 설정 패치 완료")
-          PYEOF
-          ls -lh "$PLA_DIR/phpliteadmin.php"
+          cat > "$PLA_DIR/phpliteadmin.config.php" << CFGEOF
+          <?php
+          // wpspot 자동 생성 — CF Worker 레벨에서 인증하므로 비밀번호는 비활성화
+          \$password = '';
+          \$directory = false;
+          \$databases = array(
+            array(
+              'path' => '${DB_ABS}/wordpress.db',
+              'name' => 'WordPress',
+            ),
+          );
+          CFGEOF
+          ls -lh "$PLA_DIR/index.php" "$PLA_DIR/phpliteadmin.config.php"
 
       # ── wp-config.php 생성 ───────────────────────────────────────────────
       - name: wp-config.php 생성
@@ -205,16 +231,11 @@ jobs:
           if [ -n "$SALTS" ]; then
             echo "$SALTS" >> wp-config.php
           else
-            cat >> wp-config.php << 'SALTEOF'
-          define('AUTH_KEY',         'wpspot-auth-key-replace-me');
-          define('SECURE_AUTH_KEY',  'wpspot-secure-auth-key');
-          define('LOGGED_IN_KEY',    'wpspot-logged-in-key');
-          define('NONCE_KEY',        'wpspot-nonce-key');
-          define('AUTH_SALT',        'wpspot-auth-salt');
-          define('SECURE_AUTH_SALT', 'wpspot-secure-auth-salt');
-          define('LOGGED_IN_SALT',   'wpspot-logged-in-salt');
-          define('NONCE_SALT',       'wpspot-nonce-salt');
-          SALTEOF
+            echo "::warning::wordpress.org salt API 호출 실패 — 로컬에서 랜덤 솔트를 생성합니다."
+            for KEY in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
+              RANDVAL=$(openssl rand -base64 48 | tr -d '\n' | tr "'" '_')
+              echo "define('${KEY}', '${RANDVAL}');" >> wp-config.php
+            done
           fi
           echo "if(!defined('ABSPATH')){define('ABSPATH',__DIR__.'/');}require_once ABSPATH.'wp-settings.php';" \
             >> wp-config.php
@@ -237,6 +258,7 @@ jobs:
 
           if [ ! -f "wp-content/database/wordpress.db" ]; then
             # WP-CLI는 내장 서버 없이도 SQLite 모드에서 직접 DB 생성 가능
+            set +e
             wp core install \
               --url="$SITE_URL" \
               --title="$DISPLAY" \
@@ -244,12 +266,26 @@ jobs:
               --admin_password="$WP_PASS" \
               --admin_email="admin@wpspot.app" \
               --skip-email \
-              --allow-root
+              --allow-root 2>&1 | tee /tmp/wp-install.log
+            INSTALL_RC=${PIPESTATUS[0]}
+            set -e
+            if [ "$INSTALL_RC" != "0" ]; then
+              echo "::error::wp core install 실패 (exit $INSTALL_RC)"
+              exit 1
+            fi
+            # db.php drop-in만으로도 동작하지만, 플러그인 목록에도 활성으로 등록해야
+            # wp-admin에 "drop-in 있는데 플러그인 비활성" 경고가 뜨지 않음.
+            wp plugin activate sqlite-database-integration --allow-root || true
             wp option update permalink_structure '/%postname%/' --allow-root
             wp rewrite flush --allow-root
             echo "WordPress 설치 완료"
           else
             echo "이미 설치됨"
+          fi
+          if [ ! -f "wp-content/database/wordpress.db" ]; then
+            echo "::error::wordpress.db 파일이 생성되지 않았습니다 — wp core install 실패"
+            cat /tmp/wp-install.log 2>/dev/null || true
+            exit 1
           fi
           ls -lh wp-content/database/wordpress.db
 
@@ -259,17 +295,22 @@ jobs:
         run: |
           # PHP 내장 서버: nginx/Apache/FPM 완전 대체
           # WordPress 라우터 스크립트 생성 (퍼머링크 처리)
+          # 주의: 라우터 스크립트 파일 자체는 /tmp에 있지만, `-t` 없이 php -S를 실행하면
+          # document root는 서버 기동 시점의 cwd(= wordpress/)가 됨. 이전 버전은 __DIR__
+          # (라우터 파일 자신의 위치인 /tmp)를 써서 모든 정적 자산(CSS/JS/이미지)이 깨졌었음.
           cat > /tmp/wp-router.php << 'ROUTEREOF'
           <?php
+          $docroot = $_SERVER['DOCUMENT_ROOT'] !== '' ? $_SERVER['DOCUMENT_ROOT'] : getcwd();
           $uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
-          $file = __DIR__ . $uri;
+          $file = $docroot . $uri;
           // 실제 파일이 존재하면 그대로 서빙 (CSS, JS, 이미지 등)
           if ($uri !== '/' && file_exists($file) && !is_dir($file)) {
               return false;
           }
           // WordPress로 라우팅
-          if (file_exists(__DIR__ . '/wp-blog-header.php')) {
-              require __DIR__ . '/wp-blog-header.php';
+          chdir($docroot);
+          if (file_exists($docroot . '/wp-blog-header.php')) {
+              require $docroot . '/wp-blog-header.php';
           } else {
               http_response_code(503);
               echo 'WordPress not found';
@@ -308,9 +349,13 @@ jobs:
       # trycloudflare.com — 계정 불필요, 완전 무료, 서버리스
       - name: cloudflared 설치
         run: |
-          curl -sSL \
+          curl -sSL -f \
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" \
             -o /tmp/cloudflared.deb
+          if [ ! -s /tmp/cloudflared.deb ]; then
+            echo "::error::cloudflared 다운로드 실패 (빈 파일)"
+            exit 1
+          fi
           dpkg -x /tmp/cloudflared.deb /tmp/cloudflared-pkg
           sudo cp /tmp/cloudflared-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
           cloudflared --version
