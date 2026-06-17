@@ -31,7 +31,7 @@ on:
         required: false
         default: ""
       secret_cf_api_token:
-        description: "Cloudflare API Token"
+        description: "Cloudflare API Token (Tunnel:Edit + Worker:Edit 권한)"
         required: false
         default: ""
       secret_github_token:
@@ -74,7 +74,6 @@ jobs:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
 
-      # ── PHP 8.3 설치 (내장 서버 모드 사용 — nginx/FPM 불필요) ───────────
       - name: PHP 8.3 설치
         uses: shivammathur/setup-php@v2
         with:
@@ -92,10 +91,6 @@ jobs:
         run: |
           curl -sSL -f https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
             -o /usr/local/bin/wp
-          if [ ! -s /usr/local/bin/wp ]; then
-            echo "::error::WP-CLI 다운로드 실패 (빈 파일)"
-            exit 1
-          fi
           chmod +x /usr/local/bin/wp
           wp --info --allow-root
 
@@ -103,16 +98,8 @@ jobs:
         run: |
           if [ ! -f wordpress/wp-load.php ]; then
             curl -sSL -f https://wordpress.org/latest.tar.gz -o /tmp/wp.tar.gz
-            if [ ! -s /tmp/wp.tar.gz ]; then
-              echo "::error::WordPress 다운로드 실패 (빈 파일)"
-              exit 1
-            fi
             tar -xzf /tmp/wp.tar.gz -C .
             rm /tmp/wp.tar.gz
-          fi
-          if [ ! -f wordpress/wp-load.php ]; then
-            echo "::error::WordPress 압축 해제 후 wp-load.php를 찾을 수 없습니다."
-            exit 1
           fi
           php -r "include 'wordpress/wp-includes/version.php'; echo 'WP ' . \$wp_version . PHP_EOL;"
 
@@ -123,63 +110,30 @@ jobs:
             curl -sSL -f \
               "https://downloads.wordpress.org/plugin/sqlite-database-integration.latest-stable.zip" \
               -o /tmp/sqlite.zip
-            if [ ! -s /tmp/sqlite.zip ]; then
-              echo "::error::SQLite 플러그인 다운로드 실패 (빈 파일)"
-              exit 1
-            fi
             unzip -q /tmp/sqlite.zip -d wordpress/wp-content/plugins/
             rm /tmp/sqlite.zip
-          fi
-          if [ ! -f "wordpress/wp-content/plugins/sqlite-database-integration/db.copy" ]; then
-            echo "::error::db.copy 파일을 찾을 수 없습니다. 플러그인 압축 구조가 변경되었을 수 있습니다."
-            find wordpress/wp-content/plugins/sqlite-database-integration -maxdepth 1
-            exit 1
           fi
           if [ ! -f "wordpress/wp-content/db.php" ]; then
             cp wordpress/wp-content/plugins/sqlite-database-integration/db.copy \
                wordpress/wp-content/db.php
           fi
-          echo "SQLite 플러그인 준비 완료"
 
-      # ── PHPLiteAdmin 설치 ────────────────────────────────────────────────
-      # 공식 레포는 phpLiteAdmin/pla (phpLiteAdmin/phpLiteAdmin은 존재하지 않음),
-      # GitHub Releases가 없고, 단일 파일 phpliteadmin.php도 없음 (build.php로 빌드해야 생성됨).
-      # 따라서 index.php + classes/ + languages/ 구조를 그대로 받아 index.php를 진입점으로 사용.
       - name: PHPLiteAdmin 설치
         run: |
           PLA_DIR="wordpress/wp-content/phpliteadmin"
           if [ ! -f "$PLA_DIR/index.php" ]; then
             mkdir -p "$PLA_DIR"
-            rm -f /tmp/pla.tar.gz
             curl -sSL -f \
               "https://github.com/phpLiteAdmin/pla/archive/refs/heads/master.tar.gz" \
               -o /tmp/pla.tar.gz
-            if [ ! -s /tmp/pla.tar.gz ]; then
-              echo "::error::PHPLiteAdmin 다운로드 실패 (빈 파일)"
-              exit 1
-            fi
-            rm -rf /tmp/pla_src && mkdir -p /tmp/pla_src
-            tar -xzf /tmp/pla.tar.gz -C /tmp/pla_src --strip-components=1
-            rm -f /tmp/pla.tar.gz
-
-            if [ ! -f "/tmp/pla_src/index.php" ]; then
-              echo "::error::PHPLiteAdmin 압축 해제 후 index.php를 찾을 수 없습니다."
-              find /tmp/pla_src -maxdepth 1
-              exit 1
-            fi
-
+            tar -xzf /tmp/pla.tar.gz -C /tmp/pla_src --strip-components=1 2>/dev/null || \
+              (mkdir -p /tmp/pla_src && tar -xzf /tmp/pla.tar.gz -C /tmp/pla_src --strip-components=1)
             cp -r /tmp/pla_src/. "$PLA_DIR/"
-            rm -rf /tmp/pla_src
+            rm -rf /tmp/pla.tar.gz /tmp/pla_src
           fi
-          ls -lh "$PLA_DIR/index.php"
-
-          # PHPLiteAdmin 설정: 공식적으로 지원되는 외부 설정 파일(phpliteadmin.config.php) 사용.
-          # phpliteadmin.php 소스를 직접 정규식으로 패치하는 방식은 깨지기 쉽고,
-          # 애초에 이 레포에는 단일 phpliteadmin.php 파일이 존재하지 않음(index.php가 진입점).
           DB_ABS="$(pwd)/wordpress/wp-content/database"
           cat > "$PLA_DIR/phpliteadmin.config.php" << CFGEOF
           <?php
-          // wpspot 자동 생성 — CF Worker 레벨에서 인증하므로 비밀번호는 비활성화
           \$password = '';
           \$directory = false;
           \$databases = array(
@@ -189,9 +143,7 @@ jobs:
             ),
           );
           CFGEOF
-          ls -lh "$PLA_DIR/index.php" "$PLA_DIR/phpliteadmin.config.php"
 
-      # ── wp-config.php 생성 ───────────────────────────────────────────────
       - name: wp-config.php 생성
         run: |
           cd wordpress
@@ -200,9 +152,7 @@ jobs:
           SITE_URL="${SITE_URL:-https://${{ inputs.site_slug }}.wpspot.app}"
           DISPLAY="${{ inputs.site_display_name }}"
           [ -z "$DISPLAY" ] && DISPLAY="${{ inputs.site_slug }}"
-
           SALTS=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || true)
-
           cat > wp-config.php << WPEOF
           <?php
           define('DB_NAME',     'wordpress');
@@ -211,39 +161,29 @@ jobs:
           define('DB_HOST',     'localhost');
           define('DB_CHARSET',  'utf8mb4');
           define('DB_COLLATE',  '');
-
           define('DB_DIR',  __DIR__ . '/wp-content/database/');
           define('DB_FILE', 'wordpress.db');
-
           define('WP_HOME',    '${SITE_URL}');
           define('WP_SITEURL', '${SITE_URL}');
-
           define('WP_CACHE',             true);
           define('WP_DEBUG',             false);
           define('WP_DEBUG_LOG',         false);
           define('CONCATENATE_SCRIPTS',  false);
           define('DISALLOW_FILE_EDIT',   false);
           define('FS_METHOD',            'direct');
-
           \$table_prefix = 'wp_';
           WPEOF
-
           if [ -n "$SALTS" ]; then
             echo "$SALTS" >> wp-config.php
           else
-            echo "::warning::wordpress.org salt API 호출 실패 — 로컬에서 랜덤 솔트를 생성합니다."
             for KEY in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
               RANDVAL=$(openssl rand -base64 48 | tr -d '\n' | tr "'" '_')
               echo "define('${KEY}', '${RANDVAL}');" >> wp-config.php
             done
           fi
-          echo "if(!defined('ABSPATH')){define('ABSPATH',__DIR__.'/');}require_once ABSPATH.'wp-settings.php';" \
-            >> wp-config.php
-          echo "wp-config.php 생성 완료"
+          echo "if(!defined('ABSPATH')){define('ABSPATH',__DIR__.'/');}require_once ABSPATH.'wp-settings.php';" >> wp-config.php
 
-      # ── WordPress 설치 (WP-CLI + PHP 내장 서버) ─────────────────────────
-      # PHP 내장 서버(-S)로 WordPress를 실행 — nginx/FPM 완전 불필요
-      - name: PHP 내장 서버로 WordPress 설치
+      - name: WordPress 설치 (WP-CLI + SQLite)
         run: |
           cd wordpress
           CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
@@ -255,10 +195,9 @@ jobs:
           [ -z "$WP_PASS" ] && WP_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
           WP_USER="${{ inputs.wp_admin_user }}"
           [ -z "$WP_USER" ] && WP_USER="wpadmin"
-
+          echo "WP_ADMIN_PASS=${WP_PASS}" >> $GITHUB_ENV
+          echo "WP_ADMIN_USER=${WP_USER}" >> $GITHUB_ENV
           if [ ! -f "wp-content/database/wordpress.db" ]; then
-            # WP-CLI는 내장 서버 없이도 SQLite 모드에서 직접 DB 생성 가능
-            set +e
             wp core install \
               --url="$SITE_URL" \
               --title="$DISPLAY" \
@@ -266,159 +205,231 @@ jobs:
               --admin_password="$WP_PASS" \
               --admin_email="admin@wpspot.app" \
               --skip-email \
-              --allow-root 2>&1 | tee /tmp/wp-install.log
-            INSTALL_RC=${PIPESTATUS[0]}
-            set -e
-            if [ "$INSTALL_RC" != "0" ]; then
-              echo "::error::wp core install 실패 (exit $INSTALL_RC)"
-              exit 1
-            fi
-            # db.php drop-in만으로도 동작하지만, 플러그인 목록에도 활성으로 등록해야
-            # wp-admin에 "drop-in 있는데 플러그인 비활성" 경고가 뜨지 않음.
+              --allow-root
             wp plugin activate sqlite-database-integration --allow-root || true
             wp option update permalink_structure '/%postname%/' --allow-root
             wp rewrite flush --allow-root
-            echo "WordPress 설치 완료"
-          else
-            echo "이미 설치됨"
-          fi
-          if [ ! -f "wp-content/database/wordpress.db" ]; then
-            echo "::error::wordpress.db 파일이 생성되지 않았습니다 — wp core install 실패"
-            cat /tmp/wp-install.log 2>/dev/null || true
-            exit 1
           fi
           ls -lh wp-content/database/wordpress.db
 
-      # ── PHP 내장 서버 시작 (서버리스 방식) ──────────────────────────────
-      # GitHub Actions runner에서 PHP -S 로 실행 = 서버 데몬 불필요
-      - name: "PHP 내장 서버 시작 (WordPress: 포트 8888)"
+      # ── PHP 내장 서버 시작 ────────────────────────────────────────────────
+      - name: WordPress PHP 내장 서버 시작 (포트 8888)
         run: |
-          # PHP 내장 서버: nginx/Apache/FPM 완전 대체
-          # WordPress 라우터 스크립트 생성 (퍼머링크 처리)
-          # 주의: 라우터 스크립트 파일 자체는 /tmp에 있지만, `-t` 없이 php -S를 실행하면
-          # document root는 서버 기동 시점의 cwd(= wordpress/)가 됨. 이전 버전은 __DIR__
-          # (라우터 파일 자신의 위치인 /tmp)를 써서 모든 정적 자산(CSS/JS/이미지)이 깨졌었음.
           cat > /tmp/wp-router.php << 'ROUTEREOF'
           <?php
           $docroot = $_SERVER['DOCUMENT_ROOT'] !== '' ? $_SERVER['DOCUMENT_ROOT'] : getcwd();
           $uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
           $file = $docroot . $uri;
-          // 실제 파일이 존재하면 그대로 서빙 (CSS, JS, 이미지 등)
-          if ($uri !== '/' && file_exists($file) && !is_dir($file)) {
-              return false;
-          }
-          // WordPress로 라우팅
+          if ($uri !== '/' && file_exists($file) && !is_dir($file)) { return false; }
           chdir($docroot);
           if (file_exists($docroot . '/wp-blog-header.php')) {
               require $docroot . '/wp-blog-header.php';
           } else {
-              http_response_code(503);
-              echo 'WordPress not found';
+              http_response_code(503); echo 'WordPress not found';
           }
           ROUTEREOF
-
-          # 백그라운드로 PHP 내장 서버 실행
           cd wordpress
           php -S 0.0.0.0:8888 /tmp/wp-router.php \
-            -d display_errors=0 \
-            -d log_errors=1 \
+            -d display_errors=0 -d log_errors=1 \
             >> /tmp/php-wp.log 2>&1 &
           echo $! > /tmp/php-wp.pid
           sleep 3
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:8888/ || echo "000")
+          echo "WordPress PHP 서버: $CODE"
+          [ "$CODE" = "000" ] && { echo "::warning::PHP 서버 응답 없음"; cat /tmp/php-wp.log | tail -20; }
 
-          # 헬스체크
-          HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:8888/ || echo "000")
-          echo "WordPress PHP 내장 서버 HTTP: $HTTP_CODE"
-          [ "$HTTP_CODE" != "000" ] && echo "PHP 내장 서버: OK" || { echo "::warning::PHP 서버 응답 없음"; cat /tmp/php-wp.log | tail -20; }
-
-      - name: "PHP 내장 서버 시작 (PHPLiteAdmin: 포트 8889)"
+      - name: PHPLiteAdmin PHP 내장 서버 시작 (포트 8889)
         run: |
           PLA_DIR="$(pwd)/wordpress/wp-content/phpliteadmin"
           cd "$PLA_DIR"
-          php -S 0.0.0.0:8889 \
-            -d display_errors=0 \
-            -d log_errors=1 \
+          php -S 0.0.0.0:8889 -d display_errors=0 -d log_errors=1 \
             >> /tmp/php-pla.log 2>&1 &
-          echo $! > /tmp/php-pla.pid
           sleep 2
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:8889/ || echo "000")
+          echo "PHPLiteAdmin PHP 서버: $CODE"
 
-          HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:8889/ || echo "000")
-          echo "PHPLiteAdmin PHP 내장 서버 HTTP: $HTTP_CODE"
-
-      # ── cloudflared Quick Tunnel ─────────────────────────────────────────
-      # trycloudflare.com — 계정 불필요, 완전 무료, 서버리스
+      # ── cloudflared 설치 ──────────────────────────────────────────────────
       - name: cloudflared 설치
         run: |
           curl -sSL -f \
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" \
             -o /tmp/cloudflared.deb
-          if [ ! -s /tmp/cloudflared.deb ]; then
-            echo "::error::cloudflared 다운로드 실패 (빈 파일)"
-            exit 1
-          fi
           dpkg -x /tmp/cloudflared.deb /tmp/cloudflared-pkg
           sudo cp /tmp/cloudflared-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
           cloudflared --version
 
-      - name: cloudflared Quick Tunnel 시작 (WordPress)
-        run: |
-          cloudflared tunnel --url http://127.0.0.1:8888 \
-            --no-autoupdate \
-            --logfile /tmp/cf-wp.log 2>&1 &
-          echo $! > /tmp/cf-wp.pid
-
-          # URL 추출 대기 (최대 30초)
-          TUNNEL_URL=""
-          for i in $(seq 1 30); do
-            sleep 1
-            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
-              /tmp/cf-wp.log 2>/dev/null | head -1 || true)
-            [ -n "$TUNNEL_URL" ] && break
-          done
-          [ -z "$TUNNEL_URL" ] && { echo "::error::WP 터널 URL 획득 실패"; cat /tmp/cf-wp.log; exit 1; }
-          echo "WP 터널: $TUNNEL_URL"
-          echo "TUNNEL_WP_URL=$TUNNEL_URL" >> $GITHUB_ENV
-
-      - name: cloudflared Quick Tunnel 시작 (PHPLiteAdmin)
-        run: |
-          cloudflared tunnel --url http://127.0.0.1:8889 \
-            --no-autoupdate \
-            --logfile /tmp/cf-pla.log 2>&1 &
-          echo $! > /tmp/cf-pla.pid
-
-          TUNNEL_PLA_URL=""
-          for i in $(seq 1 30); do
-            sleep 1
-            TUNNEL_PLA_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
-              /tmp/cf-pla.log 2>/dev/null | head -1 || true)
-            [ -n "$TUNNEL_PLA_URL" ] && break
-          done
-          echo "PLA 터널: ${TUNNEL_PLA_URL:-없음}"
-          echo "TUNNEL_PLA_URL=${TUNNEL_PLA_URL:-}" >> $GITHUB_ENV
-
-      # ── Cloudflare Worker 배포 ───────────────────────────────────────────
-      - name: Cloudflare Worker 배포
+      # ── Named Tunnel 생성/재사용 ─────────────────────────────────────────
+      # Named Tunnel은 CF 계정에 영구 등록 → hostname이 고정됨 (trycloudflare처럼 매번 바뀌지 않음)
+      - name: Named Cloudflare Tunnel 생성 (WordPress)
         env:
           CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::CF 자격증명 없음 — Named Tunnel 생성 건너뜀"
+            echo "CF_CREDS_OK=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          echo "CF_CREDS_OK=true" >> $GITHUB_ENV
+
+          TUNNEL_NAME="wpspot-${{ inputs.site_slug }}-wp"
+          PLA_TUNNEL_NAME="wpspot-${{ inputs.site_slug }}-pla"
+
+          mkdir -p /tmp/cf-tunnel deploy
+
+          # cloudflared login (token 방식)
+          cloudflared tunnel --origincert /tmp/cert.pem \
+            login --client-id "$CLOUDFLARE_ACCOUNT_ID" \
+            --client-secret "$CLOUDFLARE_API_TOKEN" 2>/dev/null || true
+
+          # Named Tunnel 생성 (이미 존재하면 기존 것 재사용)
+          # CF API로 직접 생성
+          WP_RESP=$(curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"${TUNNEL_NAME}\",\"tunnel_secret\":\"$(openssl rand -base64 32)\"}")
+
+          WP_TUNNEL_ID=$(echo "$WP_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['id'])" 2>/dev/null || echo "")
+
+          if [ -z "$WP_TUNNEL_ID" ]; then
+            # 이미 존재하는 터널 조회
+            LIST_RESP=$(curl -s \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+            WP_TUNNEL_ID=$(echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'][0]['id'])" 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$WP_TUNNEL_ID" ]; then
+            echo "::error::WordPress Named Tunnel 생성/조회 실패"
+            echo "응답: $WP_RESP"
+            exit 1
+          fi
+          echo "WP Named Tunnel ID: $WP_TUNNEL_ID"
+
+          # Tunnel Token 획득 (connector 인증에 사용)
+          WP_TOKEN_RESP=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${WP_TUNNEL_ID}/token" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+          WP_TUNNEL_TOKEN=$(echo "$WP_TOKEN_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'])" 2>/dev/null || echo "")
+
+          if [ -z "$WP_TUNNEL_TOKEN" ]; then
+            echo "::error::WP Tunnel Token 획득 실패"
+            exit 1
+          fi
+
+          # PLA Tunnel
+          PLA_RESP=$(curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"${PLA_TUNNEL_NAME}\",\"tunnel_secret\":\"$(openssl rand -base64 32)\"}")
+          PLA_TUNNEL_ID=$(echo "$PLA_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['id'])" 2>/dev/null || echo "")
+
+          if [ -z "$PLA_TUNNEL_ID" ]; then
+            LIST_RESP=$(curl -s \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?name=${PLA_TUNNEL_NAME}&is_deleted=false" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+            PLA_TUNNEL_ID=$(echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'][0]['id'])" 2>/dev/null || echo "")
+          fi
+
+          PLA_TOKEN_RESP=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${PLA_TUNNEL_ID}/token" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+          PLA_TUNNEL_TOKEN=$(echo "$PLA_TOKEN_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result'])" 2>/dev/null || echo "")
+
+          # Named Tunnel의 고정 hostname: <tunnel-id>.cfargotunnel.com
+          WP_TUNNEL_HOST="${WP_TUNNEL_ID}.cfargotunnel.com"
+          PLA_TUNNEL_HOST="${PLA_TUNNEL_ID}.cfargotunnel.com"
+
+          echo "WP_TUNNEL_ID=${WP_TUNNEL_ID}"       >> $GITHUB_ENV
+          echo "WP_TUNNEL_TOKEN=${WP_TUNNEL_TOKEN}"  >> $GITHUB_ENV
+          echo "WP_TUNNEL_HOST=${WP_TUNNEL_HOST}"    >> $GITHUB_ENV
+          echo "PLA_TUNNEL_ID=${PLA_TUNNEL_ID}"      >> $GITHUB_ENV
+          echo "PLA_TUNNEL_TOKEN=${PLA_TUNNEL_TOKEN}" >> $GITHUB_ENV
+          echo "PLA_TUNNEL_HOST=${PLA_TUNNEL_HOST}"  >> $GITHUB_ENV
+          echo "TUNNEL_NAME=${TUNNEL_NAME}"           >> $GITHUB_ENV
+          echo "PLA_TUNNEL_NAME=${PLA_TUNNEL_NAME}"  >> $GITHUB_ENV
+
+          # tunnel-config.json 저장 (keepalive에서 재사용)
+          WORKER_NAME="${{ inputs.secret_worker_name }}"
+          [ -z "$WORKER_NAME" ] && WORKER_NAME="wpspot-${{ inputs.site_slug }}"
+          cat > deploy/tunnel-config.json << CFGJSON
+          {
+            "wp_port": 8888,
+            "pla_port": 8889,
+            "wordpress_dir": "wordpress",
+            "pla_dir": "wordpress/wp-content/phpliteadmin",
+            "worker_name": "${WORKER_NAME}",
+            "pma_worker": "${WORKER_NAME}-pma",
+            "site_slug": "${{ inputs.site_slug }}",
+            "custom_domain": "${{ inputs.custom_domain }}",
+            "pma_domain": "${{ inputs.pma_domain }}",
+            "wp_tunnel_id": "${WP_TUNNEL_ID}",
+            "wp_tunnel_host": "${WP_TUNNEL_HOST}",
+            "pla_tunnel_id": "${PLA_TUNNEL_ID}",
+            "pla_tunnel_host": "${PLA_TUNNEL_HOST}"
+          }
+          CFGJSON
+          # Tunnel Token은 Secret으로만 저장 (파일에 평문 저장 금지)
+          echo "설정 저장 완료"
+
+      # ── Named Tunnel Connector 시작 ──────────────────────────────────────
+      - name: Cloudflare Named Tunnel 연결 (WordPress)
+        run: |
+          if [ "${CF_CREDS_OK}" != "true" ]; then
+            echo "CF 자격증명 없음 — 터널 연결 건너뜀"
+            exit 0
+          fi
+          # --token 방식: credentials 파일 불필요, 계정 로그인 불필요
+          cloudflared tunnel --no-autoupdate run \
+            --token "${WP_TUNNEL_TOKEN}" \
+            --url http://127.0.0.1:8888 \
+            --logfile /tmp/cf-wp-named.log 2>&1 &
+          echo $! > /tmp/cf-wp-named.pid
+          sleep 5
+          # 연결 확인
+          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp-named.log 2>/dev/null || echo "0")
+          echo "WP Named Tunnel 연결 수: $CONN"
+          [ "$CONN" = "0" ] && cat /tmp/cf-wp-named.log | tail -20 || true
+          echo "WP 터널 URL: https://${WP_TUNNEL_HOST}"
+
+      - name: Cloudflare Named Tunnel 연결 (PHPLiteAdmin)
+        run: |
+          if [ "${CF_CREDS_OK}" != "true" ]; then exit 0; fi
+          [ -z "$PLA_TUNNEL_TOKEN" ] && { echo "PLA 터널 토큰 없음 — 건너뜀"; exit 0; }
+          cloudflared tunnel --no-autoupdate run \
+            --token "${PLA_TUNNEL_TOKEN}" \
+            --url http://127.0.0.1:8889 \
+            --logfile /tmp/cf-pla-named.log 2>&1 &
+          sleep 3
+          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-pla-named.log 2>/dev/null || echo "0")
+          echo "PLA Named Tunnel 연결 수: $CONN"
+          echo "PLA 터널 URL: https://${PLA_TUNNEL_HOST}"
+
+      # ── Cloudflare Worker 배포 ───────────────────────────────────────────
+      # Worker는 고정 Named Tunnel hostname을 origin으로 사용 → URL 절대 안 바뀜
+      - name: Cloudflare Worker 배포 (고정 hostname 사용)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
+        run: |
+          if [ "${CF_CREDS_OK}" != "true" ]; then
             echo "CF 자격증명 없음 — Worker 배포 건너뜀"
             exit 0
           fi
-
           WORKER_NAME="${{ inputs.secret_worker_name }}"
           [ -z "$WORKER_NAME" ] && WORKER_NAME="wpspot-${{ inputs.site_slug }}"
           PMA_WORKER="${WORKER_NAME}-pma"
 
           npm install -g wrangler --quiet --no-progress 2>/dev/null
 
-          # ── WordPress Worker ─────────────────────────────────────────────
+          # WordPress Worker
           mkdir -p /tmp/cf-wp
           cat > /tmp/cf-wp/worker.js << 'WORKEREOF'
           export default {
             async fetch(request, env) {
-              const origin = env.NGINX_ORIGIN;
+              const origin = env.TUNNEL_ORIGIN;
               if (!origin) {
                 return new Response(offlinePage(), {
                   status: 503,
@@ -432,22 +443,17 @@ jobs:
               const headers = new Headers(request.headers);
               headers.set('host', new URL(origin).host);
               headers.set('x-forwarded-proto', 'https');
-              headers.set('x-real-ip',
-                request.headers.get('cf-connecting-ip') || '');
+              headers.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
               try {
                 const resp = await fetch(target.toString(), {
                   method:   request.method,
                   headers,
-                  body: ['GET','HEAD'].includes(request.method)
-                    ? undefined : request.body,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
                   redirect: 'manual',
                 });
                 const out = new Headers(resp.headers);
                 out.set('x-powered-by', 'wpspot/serverless');
-                return new Response(resp.body, {
-                  status:  resp.status,
-                  headers: out,
-                });
+                return new Response(resp.body, { status: resp.status, headers: out });
               } catch (e) {
                 return new Response(offlinePage(e.message), {
                   status: 503,
@@ -459,19 +465,12 @@ jobs:
           function offlinePage(msg) {
             return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">'
               + '<meta http-equiv="refresh" content="30"><title>준비 중</title>'
-              + '<style>*{box-sizing:border-box}body{font-family:system-ui;'
-              + 'display:flex;align-items:center;justify-content:center;'
-              + 'min-height:100vh;margin:0;background:#f8fafc}'
+              + '<style>body{font-family:system-ui;display:flex;align-items:center;'
+              + 'justify-content:center;min-height:100vh;margin:0;background:#f8fafc}'
               + '.c{text-align:center;max-width:420px;padding:2rem}'
-              + 'h2{color:#1e293b;margin-bottom:.5rem}'
-              + 'p{color:#64748b;line-height:1.6}'
-              + '.badge{background:#dbeafe;color:#1d4ed8;padding:3px 10px;'
-              + 'border-radius:999px;font-size:12px;font-weight:600}'
-              + '</style></head><body><div class="c">'
-              + '<div class="badge">서버리스 WordPress</div>'
-              + '<h2>⏳ 서버 준비 중이에요</h2>'
-              + '<p>GitHub Actions에서 WordPress를 실행 중이에요.<br/>'
-              + '잠시 후 자동으로 새로고침됩니다.</p>'
+              + 'h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+              + '<body><div class="c"><h2>⏳ 서버 준비 중이에요</h2>'
+              + '<p>GitHub Actions에서 WordPress를 실행 중이에요.<br/>잠시 후 자동으로 새로고침됩니다.</p>'
               + (msg ? '<p style="color:#94a3b8;font-size:12px">' + msg + '</p>' : '')
               + '</div></body></html>';
           }
@@ -482,60 +481,116 @@ jobs:
           main = "worker.js"
           compatibility_date = "2024-09-23"
           [vars]
-          NGINX_ORIGIN = "${TUNNEL_WP_URL}"
+          TUNNEL_ORIGIN = "https://${WP_TUNNEL_HOST}"
           TOMLEOF
 
           cd /tmp/cf-wp && wrangler deploy --minify
           echo "WordPress Worker 배포 완료: ${WORKER_NAME}"
-          echo "WORKER_NAME=${WORKER_NAME}" >> $GITHUB_ENV
+          WORKER_URL="https://${WORKER_NAME}.${{ inputs.secret_cf_account_id }}.workers.dev"
+          echo "WORKER_URL=${WORKER_URL}" >> $GITHUB_ENV
 
-          # ── PHPLiteAdmin Worker ──────────────────────────────────────────
-          if [ -n "$TUNNEL_PLA_URL" ]; then
+          # PHPLiteAdmin Worker
+          if [ -n "$PLA_TUNNEL_HOST" ]; then
             mkdir -p /tmp/cf-pla
             cat > /tmp/cf-pla/worker.js << 'WORKEREOF'
           export default {
             async fetch(request, env) {
-              const origin = env.PLA_ORIGIN;
-              if (!origin) {
-                return new Response('PHPLiteAdmin 준비 중', { status: 503 });
-              }
+              const origin = env.TUNNEL_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 준비 중', { status: 503 });
               const url = new URL(request.url);
-              const target = new URL(origin);
-              target.pathname = url.pathname;
-              target.search   = url.search;
-              const headers = new Headers(request.headers);
-              headers.set('host', new URL(origin).host);
-              headers.set('x-forwarded-proto', 'https');
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
               try {
-                const resp = await fetch(target.toString(), {
-                  method:   request.method,
-                  headers,
-                  body: ['GET','HEAD'].includes(request.method)
-                    ? undefined : request.body,
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
                   redirect: 'manual',
                 });
-                return new Response(resp.body, {
-                  status:  resp.status,
-                  headers: resp.headers,
-                });
+                return new Response(r.body, { status: r.status, headers: r.headers });
               } catch (e) {
-                return new Response('PHPLiteAdmin 연결 오류: ' + e.message, { status: 503 });
+                return new Response('PHPLiteAdmin 오류: ' + e.message, { status: 503 });
               }
             }
           };
           WORKEREOF
-
             cat > /tmp/cf-pla/wrangler.toml << TOMLEOF
           name = "${PMA_WORKER}"
           main = "worker.js"
           compatibility_date = "2024-09-23"
           [vars]
-          PLA_ORIGIN = "${TUNNEL_PLA_URL}"
+          TUNNEL_ORIGIN = "https://${PLA_TUNNEL_HOST}"
           TOMLEOF
-
             cd /tmp/cf-pla && wrangler deploy --minify
             echo "PLA Worker 배포 완료: ${PMA_WORKER}"
           fi
+
+      # ── GitHub Secrets 등록 (Tunnel Token) ──────────────────────────────
+      # Tunnel Token을 Secret에 저장 → keepalive에서 재사용 (파일에는 저장 안 함)
+      - name: GitHub Secrets 등록 (Tunnel Token + CF 자격증명)
+        env:
+          GH_PAT: ${{ inputs.secret_github_token }}
+        run: |
+          REPO="${{ github.repository }}"
+          [ -z "$GH_PAT" ] && { echo "PAT 없음 — 건너뜀"; exit 0; }
+          [ "${CF_CREDS_OK}" != "true" ] && { echo "CF 자격증명 없음 — 건너뜀"; exit 0; }
+
+          pip install PyNaCl --quiet --break-system-packages 2>/dev/null
+
+          PK=$(curl -sf \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/secrets/public-key" || echo "")
+          [ -z "$PK" ] && { echo "Public key 조회 실패"; exit 0; }
+
+          KEY_ID=$(echo "$PK" | python3 -c "import sys,json; print(json.load(sys.stdin)['key_id'])")
+          PUB_KEY=$(echo "$PK" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
+
+          python3 - "$PUB_KEY" > /tmp/nacl_enc.py << 'PYEOF'
+          import sys, base64
+          from nacl import encoding, public
+          pub_key_b64 = sys.argv[1]
+          pub = public.PublicKey(pub_key_b64.encode(), encoding.Base64Encoder)
+          def encrypt(value):
+              enc = public.SealedBox(pub).encrypt(value.encode())
+              return base64.b64encode(enc).decode()
+          # Read stdin for each name=value pair
+          import os
+          for line in sys.stdin:
+              line = line.strip()
+              if '=' in line:
+                  name, value = line.split('=', 1)
+                  print(f"{name}={encrypt(value)}")
+          PYEOF
+
+          set_secret() {
+            local name="$1" value="$2"
+            [ -z "$value" ] && return
+            ENC=$(echo "$value" | python3 -c "
+          import sys, base64
+          from nacl import encoding, public
+          pub = public.PublicKey('${PUB_KEY}'.encode(), encoding.Base64Encoder)
+          val = sys.stdin.read().strip()
+          enc = public.SealedBox(pub).encrypt(val.encode())
+          print(base64.b64encode(enc).decode())
+          " 2>/dev/null)
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+              -X PUT \
+              -H "Authorization: Bearer ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPO}/actions/secrets/${name}" \
+              -d "{\"encrypted_value\":\"${ENC}\",\"key_id\":\"${KEY_ID}\"}" || echo "000")
+            [ "$CODE" = "201" ] || [ "$CODE" = "204" ] && echo "✓ $name" || echo "✗ $name ($CODE)"
+          }
+
+          set_secret "CF_ACCOUNT_ID"    "${{ inputs.secret_cf_account_id }}"
+          set_secret "CF_API_TOKEN"     "${{ inputs.secret_cf_api_token }}"
+          set_secret "WP_TUNNEL_TOKEN"  "${WP_TUNNEL_TOKEN}"
+          set_secret "PLA_TUNNEL_TOKEN" "${PLA_TUNNEL_TOKEN}"
+          echo "Secrets 등록 완료"
 
       # ── wpspot API 콜백 ──────────────────────────────────────────────────
       - name: wpspot 콜백 (터널 URL 등록)
@@ -549,10 +604,11 @@ jobs:
           import json, sys
           print(json.dumps({
             'siteId':       sys.argv[1],
-            'tunnelWpUrl':  sys.argv[2],
-            'tunnelPlaUrl': sys.argv[3],
+            'tunnelWpUrl':  'https://' + sys.argv[2],
+            'tunnelPlaUrl': 'https://' + sys.argv[3],
+            'workerUrl':    sys.argv[4],
             'status':       'active'
-          }))" "$SITE_ID" "${TUNNEL_WP_URL:-}" "${TUNNEL_PLA_URL:-}")
+          }))" "$SITE_ID" "${WP_TUNNEL_HOST:-}" "${PLA_TUNNEL_HOST:-}" "${WORKER_URL:-}")
 
           CODE=$(curl -sf -o /tmp/cb.json -w "%{http_code}" \
             -X POST "$CALLBACK" \
@@ -560,105 +616,35 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" || echo "000")
           echo "콜백 응답: $CODE"
-          cat /tmp/cb.json 2>/dev/null || true
 
-      # ── GitHub Secrets 등록 ──────────────────────────────────────────────
-      - name: GitHub Secrets 등록
-        env:
-          GH_PAT: ${{ inputs.secret_github_token }}
-        run: |
-          REPO="${{ github.repository }}"
-          [ -z "$GH_PAT" ] && { echo "PAT 없음 — 건너뜀"; exit 0; }
-
-          pip install PyNaCl --quiet 2>/dev/null
-
-          PK=$(curl -sf \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/actions/secrets/public-key" || echo "")
-          [ -z "$PK" ] && { echo "Public key 조회 실패"; exit 0; }
-
-          KEY_ID=$(echo "$PK" | python3 -c "import sys,json; print(json.load(sys.stdin)['key_id'])")
-          PUB_KEY=$(echo "$PK" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
-
-          python3 > /tmp/enc.py << 'PYEOF'
-          import sys, base64
-          from nacl import encoding, public
-          pub = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder)
-          enc = public.SealedBox(pub).encrypt(sys.argv[2].encode())
-          print(base64.b64encode(enc).decode())
-          PYEOF
-
-          set_secret() {
-            local name="$1" value="$2"
-            [ -z "$value" ] && return
-            ENC=$(python3 /tmp/enc.py "$PUB_KEY" "$value" 2>/dev/null)
-            CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
-              -X PUT \
-              -H "Authorization: Bearer ${GH_PAT}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/repos/${REPO}/actions/secrets/${name}" \
-              -d "{\"encrypted_value\":\"${ENC}\",\"key_id\":\"${KEY_ID}\"}" || echo "000")
-            [ "$CODE" = "201" ] || [ "$CODE" = "204" ] && echo "✓ $name" || echo "✗ $name ($CODE)"
-          }
-
-          set_secret "CF_ACCOUNT_ID" "${{ inputs.secret_cf_account_id }}"
-          set_secret "CF_API_TOKEN"  "${{ inputs.secret_cf_api_token }}"
-
-      # ── 레포에 설정 저장 (keepalive 재사용) ─────────────────────────────
-      - name: 설정 파일 저장 (keepalive용)
-        run: |
-          mkdir -p deploy
-          # 포트/PID 정보 저장
-          WORKER_NAME="${{ inputs.secret_worker_name }}"
-          [ -z "$WORKER_NAME" ] && WORKER_NAME="wpspot-${{ inputs.site_slug }}"
-          cat > deploy/server-config.json << CFGEOF
-          {
-            "wp_port": 8888,
-            "pla_port": 8889,
-            "wp_router": "/tmp/wp-router.php",
-            "wordpress_dir": "wordpress",
-            "pla_dir": "wordpress/wp-content/phpliteadmin",
-            "worker_name": "${WORKER_NAME}",
-            "pma_worker": "${WORKER_NAME}-pma",
-            "site_slug": "${{ inputs.site_slug }}",
-            "custom_domain": "${{ inputs.custom_domain }}",
-            "pma_domain": "${{ inputs.pma_domain }}"
-          }
-          CFGEOF
-          echo "설정 저장 완료"
-
-      # ── 커밋 ─────────────────────────────────────────────────────────────
+      # ── 변경사항 커밋 ────────────────────────────────────────────────────
       - name: 변경사항 커밋 및 푸시
         run: |
           git config user.name  "wpspot-bot"
           git config user.email "bot@wpspot.app"
           git add -A
           git diff --cached --quiet || \
-            git commit -m "chore: provision wordpress+phpliteadmin [${{ inputs.site_slug }}]"
+            git commit -m "chore: provision wordpress [${{ inputs.site_slug }}]"
           git push
 
       - name: 완료 요약
         run: |
           echo "============================================"
-          echo "  wpspot 프로비저닝 완료 (서버리스)"
+          echo "  wpspot 프로비저닝 완료"
           echo "============================================"
           DOMAIN="${{ inputs.custom_domain }}"
-          [ -n "$DOMAIN" ] && echo "  사이트:   https://${DOMAIN}"
-          echo "  WP 터널:  ${TUNNEL_WP_URL}"
-          echo "  PLA 터널: ${TUNNEL_PLA_URL:-없음}"
-          echo "  엔진:     PHP 8.3 내장 서버 (nginx 불필요)"
-          echo "  DB:       SQLite (WordPress 내장)"
+          [ -n "$DOMAIN" ] && echo "  사이트:        https://${DOMAIN}"
+          echo "  WP 터널:       https://${WP_TUNNEL_HOST:-없음}"
+          echo "  PLA 터널:      https://${PLA_TUNNEL_HOST:-없음}"
+          echo "  Worker URL:    ${WORKER_URL:-없음}"
+          echo "  터널 방식:     Named Tunnel (영구 hostname)"
+          echo "  엔진:          PHP 8.3 내장 서버"
+          echo "  DB:            SQLite (WordPress 내장)"
           echo "============================================"
 
-      # ── 서버 유지 ────────────────────────────────────────────────────────
-      # provision job이 살아있는 동안 PHP 서버 + 터널 유지
-      # keepalive workflow가 이어받을 때까지 대기
-      - name: 서버 유지 (keepalive 인계 전)
+      # ── 서버 유지 (keepalive가 이어받을 때까지) ─────────────────────────
+      - name: 서버 유지 (keepalive 인계 전 360초)
         run: |
-          echo "PHP 서버 + cloudflared 터널 유지 중..."
-          # GitHub Actions cron(*/5)은 정시 실행이 보장되지 않고 지연될 수 있어
-          # keepalive workflow가 이어받을 시간을 넉넉히 확보 (4분 → 6분)
+          echo "Named Tunnel + PHP 서버 유지 중..."
           sleep 360
-          echo "provision job 종료 — keepalive workflow가 계속 유지합니다."
+          echo "provision job 종료 — keepalive가 계속 유지합니다."
