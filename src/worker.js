@@ -155,6 +155,8 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
       wpspot_callback_url:   callbackUrl,
       wpspot_site_id:        siteId,
       wpspot_jwt:            callbackJwt,
+      upstash_redis_url:     env.UPSTASH_REDIS_URL || "",
+      upstash_redis_token:   env.UPSTASH_REDIS_TOKEN || "",
     });
 
     // DB 업데이트
@@ -167,15 +169,22 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
       "SELECT site_id FROM site_credentials WHERE site_id=?"
     ).bind(siteId).first();
     if (!existingCred) {
+      const redisEnabled = env.UPSTASH_REDIS_URL ? 1 : 0;
       await env.DB.prepare(
         `INSERT INTO site_credentials
          (site_id,pla_username,pla_password_hash,pla_password_plain_enc,
-          wp_admin_username,wp_admin_password_plain_enc,db_path,nginx_status)
-         VALUES (?,?,?,?,?,?,?,'provisioning')`
+          wp_admin_username,wp_admin_password_plain_enc,db_path,nginx_status,
+          redis_enabled,redis_provider,php_main_ports,php_sub_ports,php_active_ports)
+         VALUES (?,?,?,?,?,?,?,'provisioning',?,?,?,?,?)`
       ).bind(
         siteId, "admin", plaPassHash, plaPassEnc,
         wpAdminUser, wpAdminPassEnc,
-        "wp-content/database/wordpress.db"
+        "wp-content/database/wordpress.db",
+        redisEnabled,
+        redisEnabled ? "Upstash 서버리스 Redis" : null,
+        "8888,8889",
+        "8890,8891,8892,8893,8894,8895,8896,8897",
+        "8888,8889"
       ).run();
     }
 
@@ -852,6 +861,10 @@ async function handleApi(request, env, url) {
       nginx: {
         status:    row.nginx_status,
         workerUrl: site.cf_worker_url,
+      },
+      redis: {
+        enabled: !!row.redis_enabled,
+        provider: row.redis_enabled ? "Upstash 서버리스 Redis" : null,
       },
       domain: {
         customDomain: site.custom_domain,
