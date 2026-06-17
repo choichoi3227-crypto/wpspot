@@ -37,3 +37,18 @@ APP_ENV  = "production"
 # 배포 후 실제 URL로 업데이트: wrangler.toml 또는 wrangler secret put
 # 기본값: workers.dev URL 자동 사용
 WPSPOT_BASE_URL = "https://cloud-press.co.kr"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
