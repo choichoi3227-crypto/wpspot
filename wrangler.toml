@@ -2,13 +2,6 @@ name = "wpspot"
 main = "src/worker.js"
 compatibility_date = "2026-05-16"
 
-[observability]
-enabled = true
-
-[observability.logs]
-enabled = true
-invocation_logs = true
-
 # 정적 파일 서빙 (public/)
 [assets]
 directory = "./public"
