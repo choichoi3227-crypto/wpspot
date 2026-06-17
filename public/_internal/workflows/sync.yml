@@ -1,26 +1,99 @@
-name: wpspot Keep-Alive Ping
+name: wpspot Workflow Sync
 
 on:
-  schedule:
-    # 매 6시간마다 Worker에 핑 전송 (GitHub Actions 유지)
-    - cron: "0 */6 * * *"
+  push:
+    paths:
+      - "public/_internal/workflows/**"
+    branches:
+      - main
   workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "동기화 대상 레포 (owner/repo, 비워두면 현재 레포)"
+        required: false
+        default: ""
+      gh_pat:
+        description: "대상 레포 쓰기 권한 PAT (다른 레포 대상 시 필요)"
+        required: false
+        default: ""
 
 jobs:
-  ping:
+  sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
-      - name: Keep-alive ping (CF Worker)
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 워크플로우 동기화
         env:
-          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+          GH_PAT: ${{ inputs.gh_pat || secrets.GH_PAT || '' }}
+          TARGET_REPO: ${{ inputs.target_repo || github.repository }}
         run: |
-          if [ -n "$CF_WORKER_URL" ]; then
-            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "$CF_WORKER_URL" || echo "000")
-            echo "keep-alive ping → $CF_WORKER_URL : HTTP $STATUS"
-            # PMA Worker도 핑
-            PMA_URL=$(echo "$CF_WORKER_URL" | sed 's/\.workers\.dev/-pma.workers.dev/')
-            PMA_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "$PMA_URL" || echo "000")
-            echo "keep-alive ping (PMA) → $PMA_URL : HTTP $PMA_STATUS"
-          else
-            echo "CF_WORKER_URL Secret이 설정되지 않아 keep-alive를 건너뜁니다."
+          SRC_DIR="public/_internal/workflows"
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "::error::소스 디렉토리 없음: $SRC_DIR"
+            exit 1
           fi
+
+          FILES=$(find "$SRC_DIR" -name "*.yml" -type f)
+          if [ -z "$FILES" ]; then
+            echo "동기화할 워크플로우 파일 없음"
+            exit 0
+          fi
+
+          # 동일 레포 → 직접 복사 후 커밋
+          if [ "$TARGET_REPO" = "${{ github.repository }}" ]; then
+            mkdir -p .github/workflows
+            for f in $FILES; do
+              fname=$(basename "$f")
+              cp "$f" ".github/workflows/$fname"
+              echo "✓ 복사: $fname"
+            done
+            git config user.name  "wpspot-bot"
+            git config user.email "bot@wpspot.app"
+            git add .github/workflows/
+            git diff --cached --quiet || git commit -m "chore: sync workflows from internal templates"
+            git push
+            echo "동기화 완료 (동일 레포)"
+            exit 0
+          fi
+
+          # 다른 레포 → GitHub API로 파일 업로드
+          [ -z "$GH_PAT" ] && { echo "::error::다른 레포 대상 시 GH_PAT 필요"; exit 1; }
+
+          pip install PyNaCl --quiet --break-system-packages 2>/dev/null || true
+
+          for f in $FILES; do
+            fname=$(basename "$f")
+            CONTENT=$(base64 -w 0 "$f")
+            DEST_PATH=".github/workflows/$fname"
+
+            # 기존 파일 SHA 조회 (업데이트 시 필요)
+            EXISTING=$(curl -sf \
+              -H "Authorization: Bearer ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${TARGET_REPO}/contents/${DEST_PATH}" 2>/dev/null || echo "{}")
+            SHA=$(echo "$EXISTING" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sha',''))" 2>/dev/null || echo "")
+
+            PAYLOAD="{\"message\":\"chore: sync ${fname} from wpspot\",\"content\":\"${CONTENT}\""
+            [ -n "$SHA" ] && PAYLOAD="${PAYLOAD},\"sha\":\"${SHA}\""
+            PAYLOAD="${PAYLOAD}}"
+
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+              -X PUT \
+              -H "Authorization: Bearer ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${TARGET_REPO}/contents/${DEST_PATH}" \
+              -d "$PAYLOAD" || echo "000")
+
+            if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
+              echo "✓ ${TARGET_REPO}: $fname"
+            else
+              echo "✗ ${TARGET_REPO}: $fname (HTTP $CODE)"
+            fi
+          done
+          echo "워크플로우 동기화 완료 → $TARGET_REPO"
