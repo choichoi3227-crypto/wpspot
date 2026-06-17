@@ -50,8 +50,11 @@
               </div>
               <button class="btn btn--secondary btn--s" id="ghEditBtn" onclick="toggleEdit('gh')">수정하기</button>
             </div>
-            <div class="field__help">repo, workflow 권한이 포함된 Fine-grained 또는 Classic PAT.<br/>
-              <a href="https://github.com/settings/tokens/new" target="_blank" style="color:var(--text-brand);">GitHub에서 생성하기 ↗</a>
+            <div class="field__help">
+              <b>Classic PAT</b>: <code>repo</code> + <code>workflow</code> 스코프 필수 (레포 생성, 워크플로우 파일 push, 실행에 필요).<br/>
+              <b>Fine-grained PAT</b>: 모든 레포 접근 권한 + <code>Contents: Read and write</code>, <code>Administration: Read and write</code>, <code>Actions: Read and write</code> 권한 필수.<br/>
+              저장 시 자동으로 토큰 유효성을 확인해요.
+              <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=wpspot" target="_blank" style="color:var(--text-brand);">GitHub에서 생성하기 ↗</a>
             </div>
           </div>
         </div>
