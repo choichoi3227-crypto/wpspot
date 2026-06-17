@@ -472,6 +472,16 @@ body.wps-has-shell .screen {
   .wps-table-wrap { overflow-x: auto; }
 }
 
+/* ===== Notice box (info/warn/success banners) ===== */
+.notice-box {
+  background: var(--fill-weak); border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-m); padding: var(--space-3) var(--space-4);
+  font-size: var(--fs-body-3); color: var(--text-secondary); line-height: 1.6;
+}
+.notice-box.info    { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
+.notice-box.warn    { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+.notice-box.success { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
+
 /* ===== Misc ===== */
 .stack { display: flex; flex-direction: column; gap: var(--space-3); }
 .row { display: flex; align-items: center; gap: var(--space-2); }
