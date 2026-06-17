@@ -1,10 +1,9 @@
 # wpspot — 워드프레스형 블로그스팟 호스팅
 
-블로그스팟을 워드프레스처럼 운영할 수 있게 해주는 100% 무료 호스팅 서비스입니다.
-사용자가 등록한 GitHub Token / GCP(Blogger API) Token / Cloudflare Global API Key를 이용해
+워드프레스를 운영할 수 있게 해주는 100% 무료 호스팅 서비스입니다.
+사용자가 등록한 GitHub Token / Cloudflare Global API Key를 이용해
 - GitHub에 워드프레스 원본 + nginx/PHP-FPM 환경을 자동 구성하고
 - Cloudflare에 블로그스팟용 프록시 워커를 배포하고
-- 블로그스팟 템플릿을 해당 워커로 위임합니다.
 
 블로그스팟은 "프론트엔드"로만 동작하며, 실제 백엔드(99.9%)는 워드프레스 원본이 담당합니다.
 
