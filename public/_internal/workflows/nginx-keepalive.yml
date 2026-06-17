@@ -49,13 +49,15 @@ jobs:
         run: |
           cat > /tmp/wp-router.php << 'ROUTEREOF'
           <?php
+          $docroot = $_SERVER['DOCUMENT_ROOT'] !== '' ? $_SERVER['DOCUMENT_ROOT'] : getcwd();
           $uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
-          $file = __DIR__ . $uri;
+          $file = $docroot . $uri;
           if ($uri !== '/' && file_exists($file) && !is_dir($file)) {
               return false;
           }
-          if (file_exists(__DIR__ . '/wp-blog-header.php')) {
-              require __DIR__ . '/wp-blog-header.php';
+          chdir($docroot);
+          if (file_exists($docroot . '/wp-blog-header.php')) {
+              require $docroot . '/wp-blog-header.php';
           } else {
               http_response_code(503);
               echo 'WordPress not found';
@@ -265,9 +267,9 @@ jobs:
           cat > /tmp/wp-router.php << 'EOF'
           <?php
           $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-          $f=__DIR__.$uri;
+          $d=$_SERVER['DOCUMENT_ROOT']!==''?$_SERVER['DOCUMENT_ROOT']:getcwd();$f=$d.$uri;
           if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          chdir($d);require_once file_exists($d.'/wp-blog-header.php')?$d.'/wp-blog-header.php':($d.'/index.php');
           EOF
 
           [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
@@ -407,9 +409,9 @@ jobs:
           cat > /tmp/wp-router.php << 'EOF'
           <?php
           $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-          $f=__DIR__.$uri;
+          $d=$_SERVER['DOCUMENT_ROOT']!==''?$_SERVER['DOCUMENT_ROOT']:getcwd();$f=$d.$uri;
           if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          chdir($d);require_once file_exists($d.'/wp-blog-header.php')?$d.'/wp-blog-header.php':($d.'/index.php');
           EOF
 
           [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
@@ -549,9 +551,9 @@ jobs:
           cat > /tmp/wp-router.php << 'EOF'
           <?php
           $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-          $f=__DIR__.$uri;
+          $d=$_SERVER['DOCUMENT_ROOT']!==''?$_SERVER['DOCUMENT_ROOT']:getcwd();$f=$d.$uri;
           if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          chdir($d);require_once file_exists($d.'/wp-blog-header.php')?$d.'/wp-blog-header.php':($d.'/index.php');
           EOF
 
           [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
@@ -691,9 +693,9 @@ jobs:
           cat > /tmp/wp-router.php << 'EOF'
           <?php
           $uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-          $f=__DIR__.$uri;
+          $d=$_SERVER['DOCUMENT_ROOT']!==''?$_SERVER['DOCUMENT_ROOT']:getcwd();$f=$d.$uri;
           if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-          require_once file_exists(__DIR__.'/wp-blog-header.php')?__DIR__.'/wp-blog-header.php':(__DIR__.'/index.php');
+          chdir($d);require_once file_exists($d.'/wp-blog-header.php')?$d.'/wp-blog-header.php':($d.'/index.php');
           EOF
 
           [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S 0.0.0.0:${WP_PORT} /tmp/wp-router.php -d display_errors=0 >> /tmp/php-wp.log 2>&1 & cd -; }
