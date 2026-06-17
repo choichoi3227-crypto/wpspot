@@ -132,21 +132,17 @@ jobs:
             rm -rf /tmp/pla.tar.gz /tmp/pla_src
           fi
           DB_ABS="$(pwd)/wordpress/wp-content/database"
-          python3 -c "
-import sys
-db_abs = sys.argv[1]
-cfg = '''<?php
-\$password = '';
-\$directory = false;
-\$databases = array(
-  array(
-    'path' => '%s/wordpress.db',
-    'name' => 'WordPress',
-  ),
-);
-''' % db_abs
-open('$PLA_DIR/phpliteadmin.config.php', 'w').write(cfg)
-" "$DB_ABS"
+          cat > "$PLA_DIR/phpliteadmin.config.php" << PHPEOF
+          <?php
+          \$password = '';
+          \$directory = false;
+          \$databases = array(
+            array(
+              'path' => '${DB_ABS}/wordpress.db',
+              'name' => 'WordPress',
+            ),
+          );
+          PHPEOF
 
       - name: wp-config.php 생성
         run: |
@@ -155,34 +151,29 @@ open('$PLA_DIR/phpliteadmin.config.php', 'w').write(cfg)
           SITE_URL="${CUSTOM_DOMAIN:+https://${CUSTOM_DOMAIN}}"
           SITE_URL="${SITE_URL:-https://${{ inputs.site_slug }}.wpspot.app}"
           SALTS=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || true)
-          python3 -c "
-import sys, os
-site_url = sys.argv[1]
-salts = sys.argv[2]
-cfg = '''<?php
-define(\"DB_NAME\",     \"wordpress\");
-define(\"DB_USER\",     \"root\");
-define(\"DB_PASSWORD\", \"\");
-define(\"DB_HOST\",     \"localhost\");
-define(\"DB_CHARSET\",  \"utf8mb4\");
-define(\"DB_COLLATE\",  \"\");
-define(\"DB_DIR\",  __DIR__ . \"/wp-content/database/\");
-define(\"DB_FILE\", \"wordpress.db\");
-define(\"WP_HOME\",    \"%s\");
-define(\"WP_SITEURL\", \"%s\");
-define(\"WP_CACHE\",            true);
-define(\"WP_DEBUG\",            false);
-define(\"WP_DEBUG_LOG\",        false);
-define(\"CONCATENATE_SCRIPTS\", false);
-define(\"DISALLOW_FILE_EDIT\",  false);
-define(\"FS_METHOD\",           \"direct\");
-\$table_prefix = \"wp_\";
-%s
-if(!defined(\"ABSPATH\")){define(\"ABSPATH\",__DIR__.\"/\");}
-require_once ABSPATH.\"wp-settings.php\";
-''' % (site_url, site_url, salts)
-open('wp-config.php', 'w').write(cfg)
-" "$SITE_URL" "$SALTS"
+          cat > wp-config.php << PHPEOF
+          <?php
+          define("DB_NAME",     "wordpress");
+          define("DB_USER",     "root");
+          define("DB_PASSWORD", "");
+          define("DB_HOST",     "localhost");
+          define("DB_CHARSET",  "utf8mb4");
+          define("DB_COLLATE",  "");
+          define("DB_DIR",  __DIR__ . "/wp-content/database/");
+          define("DB_FILE", "wordpress.db");
+          define("WP_HOME",    "${SITE_URL}");
+          define("WP_SITEURL", "${SITE_URL}");
+          define("WP_CACHE",            true);
+          define("WP_DEBUG",            false);
+          define("WP_DEBUG_LOG",        false);
+          define("CONCATENATE_SCRIPTS", false);
+          define("DISALLOW_FILE_EDIT",  false);
+          define("FS_METHOD",           "direct");
+          \$table_prefix = "wp_";
+          ${SALTS}
+          if(!defined("ABSPATH")){define("ABSPATH",__DIR__."/");}
+          require_once ABSPATH."wp-settings.php";
+          PHPEOF
 
           if [ ! -s wp-config.php ]; then
             echo "::error::wp-config.php 생성 실패"
@@ -220,21 +211,19 @@ open('wp-config.php', 'w').write(cfg)
 
       - name: WordPress PHP 내장 서버 시작 (포트 8888)
         run: |
-          python3 -c "
-router = r'''<?php
-\$docroot = \$_SERVER[\"DOCUMENT_ROOT\"] !== \"\" ? \$_SERVER[\"DOCUMENT_ROOT\"] : getcwd();
-\$uri = urldecode(parse_url(\$_SERVER[\"REQUEST_URI\"], PHP_URL_PATH));
-\$file = \$docroot . \$uri;
-if (\$uri !== \"/\" && file_exists(\$file) && !is_dir(\$file)) { return false; }
-chdir(\$docroot);
-if (file_exists(\$docroot . \"/wp-blog-header.php\")) {
-    require \$docroot . \"/wp-blog-header.php\";
-} else {
-    http_response_code(503); echo \"WordPress not found\";
-}
-'''
-open('/tmp/wp-router.php', 'w').write(router)
-"
+          cat > /tmp/wp-router.php << 'PHPEOF'
+          <?php
+          $docroot = $_SERVER["DOCUMENT_ROOT"] !== "" ? $_SERVER["DOCUMENT_ROOT"] : getcwd();
+          $uri = urldecode(parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH));
+          $file = $docroot . $uri;
+          if ($uri !== "/" && file_exists($file) && !is_dir($file)) { return false; }
+          chdir($docroot);
+          if (file_exists($docroot . "/wp-blog-header.php")) {
+              require $docroot . "/wp-blog-header.php";
+          } else {
+              http_response_code(503); echo "WordPress not found";
+          }
+          PHPEOF
           cd wordpress
           php -S 0.0.0.0:8888 /tmp/wp-router.php \
             -d display_errors=0 -d log_errors=1 \
@@ -323,24 +312,24 @@ open('/tmp/wp-router.php', 'w').write(router)
           [ -z "$WORKER_NAME" ] && WORKER_NAME="wpspot-${{ inputs.site_slug }}"
 
           python3 -c "
-import json, sys
-data = {
-  'wp_port': 8888, 'pla_port': 8889,
-  'wordpress_dir': 'wordpress',
-  'pla_dir': 'wordpress/wp-content/phpliteadmin',
-  'worker_name': sys.argv[1],
-  'pma_worker': sys.argv[1] + '-pma',
-  'site_slug': sys.argv[2],
-  'custom_domain': sys.argv[3],
-  'pma_domain': sys.argv[4],
-  'wp_tunnel_id': sys.argv[5],
-  'wp_tunnel_host': sys.argv[6],
-  'pla_tunnel_id': sys.argv[7],
-  'pla_tunnel_host': sys.argv[8],
-}
-open('deploy/tunnel-config.json','w').write(json.dumps(data, indent=2))
-" "$WORKER_NAME" "${{ inputs.site_slug }}" "${{ inputs.custom_domain }}" "${{ inputs.pma_domain }}" \
-  "$WP_TUNNEL_ID" "$WP_TUNNEL_HOST" "$PLA_TUNNEL_ID" "$PLA_TUNNEL_HOST"
+          import json, sys
+          data = {
+            'wp_port': 8888, 'pla_port': 8889,
+            'wordpress_dir': 'wordpress',
+            'pla_dir': 'wordpress/wp-content/phpliteadmin',
+            'worker_name': sys.argv[1],
+            'pma_worker': sys.argv[1] + '-pma',
+            'site_slug': sys.argv[2],
+            'custom_domain': sys.argv[3],
+            'pma_domain': sys.argv[4],
+            'wp_tunnel_id': sys.argv[5],
+            'wp_tunnel_host': sys.argv[6],
+            'pla_tunnel_id': sys.argv[7],
+            'pla_tunnel_host': sys.argv[8],
+          }
+          open('deploy/tunnel-config.json','w').write(json.dumps(data, indent=2))
+          " "$WORKER_NAME" "${{ inputs.site_slug }}" "${{ inputs.custom_domain }}" "${{ inputs.pma_domain }}" \
+            "$WP_TUNNEL_ID" "$WP_TUNNEL_HOST" "$PLA_TUNNEL_ID" "$PLA_TUNNEL_HOST"
 
           echo "WP_TUNNEL_ID=${WP_TUNNEL_ID}"         >> $GITHUB_ENV
           echo "WP_TUNNEL_TOKEN=${WP_TUNNEL_TOKEN}"    >> $GITHUB_ENV
@@ -385,72 +374,72 @@ open('deploy/tunnel-config.json','w').write(json.dumps(data, indent=2))
 
           mkdir -p /tmp/cf-wp
           python3 -c "
-js = '''export default {
-  async fetch(request, env) {
-    const origin = env.TUNNEL_ORIGIN;
-    if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html; charset=utf-8','Retry-After':'30'}});
-    const url = new URL(request.url);
-    const t = new URL(origin);
-    t.pathname = url.pathname; t.search = url.search;
-    const h = new Headers(request.headers);
-    h.set('host', new URL(origin).host);
-    h.set('x-forwarded-proto', 'https');
-    h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
-    try {
-      const r = await fetch(t.toString(), {method:request.method,headers:h,
-        body:[\"GET\",\"HEAD\"].includes(request.method)?undefined:request.body,redirect:\"manual\"});
-      const out = new Headers(r.headers);
-      out.set('x-powered-by','wpspot/serverless');
-      return new Response(r.body, {status:r.status, headers:out});
-    } catch(e) {
-      return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html; charset=utf-8','Retry-After':'60'}});
-    }
-  }
-};
-function offline(m){return '<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"30\"><title>준비 중</title>'
-  +'<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}'
-  +'.c{text-align:center;max-width:420px;padding:2rem}h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
-  +'<body><div class=\"c\"><h2>⏳ 서버 준비 중이에요</h2><p>잠시 후 자동으로 새로고침됩니다.</p>'
-  +(m?'<p style=\"color:#94a3b8;font-size:12px\">'+m+'</p>':'')+'</div></body></html>';}
-'''
-open('/tmp/cf-wp/worker.js','w').write(js)
-"
+          js = '''export default {
+            async fetch(request, env) {
+              const origin = env.TUNNEL_ORIGIN;
+              if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html; charset=utf-8','Retry-After':'30'}});
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
+              try {
+                const r = await fetch(t.toString(), {method:request.method,headers:h,
+                  body:[\"GET\",\"HEAD\"].includes(request.method)?undefined:request.body,redirect:\"manual\"});
+                const out = new Headers(r.headers);
+                out.set('x-powered-by','wpspot/serverless');
+                return new Response(r.body, {status:r.status, headers:out});
+              } catch(e) {
+                return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html; charset=utf-8','Retry-After':'60'}});
+              }
+            }
+          };
+          function offline(m){return '<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"30\"><title>준비 중</title>'
+            +'<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc}'
+            +'.c{text-align:center;max-width:420px;padding:2rem}h2{color:#1e293b}p{color:#64748b;line-height:1.6}</style></head>'
+            +'<body><div class=\"c\"><h2>⏳ 서버 준비 중이에요</h2><p>잠시 후 자동으로 새로고침됩니다.</p>'
+            +(m?'<p style=\"color:#94a3b8;font-size:12px\">'+m+'</p>':'')+'</div></body></html>';}
+          '''
+          open('/tmp/cf-wp/worker.js','w').write(js)
+          "
           python3 -c "
-import sys
-toml = 'name = \"%s\"\nmain = \"worker.js\"\ncompatibility_date = \"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN = \"https://%s\"\n' % (sys.argv[1], sys.argv[2])
-open('/tmp/cf-wp/wrangler.toml','w').write(toml)
-" "$WORKER_NAME" "$WP_TUNNEL_HOST"
+          import sys
+          toml = 'name = \"%s\"\nmain = \"worker.js\"\ncompatibility_date = \"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN = \"https://%s\"\n' % (sys.argv[1], sys.argv[2])
+          open('/tmp/cf-wp/wrangler.toml','w').write(toml)
+          " "$WORKER_NAME" "$WP_TUNNEL_HOST"
           cd /tmp/cf-wp && wrangler deploy --minify
           echo "WordPress Worker 배포 완료: ${WORKER_NAME}"
           echo "WORKER_URL=https://${WORKER_NAME}.${{ inputs.secret_cf_account_id }}.workers.dev" >> $GITHUB_ENV
 
           mkdir -p /tmp/cf-pla
           python3 -c "
-js = '''export default {
-  async fetch(request, env) {
-    const origin = env.TUNNEL_ORIGIN;
-    if (!origin) return new Response('PHPLiteAdmin 준비 중', {status:503});
-    const url = new URL(request.url);
-    const t = new URL(origin);
-    t.pathname = url.pathname; t.search = url.search;
-    const h = new Headers(request.headers);
-    h.set('host', new URL(origin).host);
-    h.set('x-forwarded-proto', 'https');
-    try {
-      const r = await fetch(t.toString(), {method:request.method,headers:h,
-        body:[\"GET\",\"HEAD\"].includes(request.method)?undefined:request.body,redirect:\"manual\"});
-      return new Response(r.body, {status:r.status, headers:r.headers});
-    } catch(e) { return new Response('PHPLiteAdmin 오류: '+e.message, {status:503}); }
-  }
-};
-'''
-open('/tmp/cf-pla/worker.js','w').write(js)
-"
+          js = '''export default {
+            async fetch(request, env) {
+              const origin = env.TUNNEL_ORIGIN;
+              if (!origin) return new Response('PHPLiteAdmin 준비 중', {status:503});
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto', 'https');
+              try {
+                const r = await fetch(t.toString(), {method:request.method,headers:h,
+                  body:[\"GET\",\"HEAD\"].includes(request.method)?undefined:request.body,redirect:\"manual\"});
+                return new Response(r.body, {status:r.status, headers:r.headers});
+              } catch(e) { return new Response('PHPLiteAdmin 오류: '+e.message, {status:503}); }
+            }
+          };
+          '''
+          open('/tmp/cf-pla/worker.js','w').write(js)
+          "
           python3 -c "
-import sys
-toml = 'name = \"%s\"\nmain = \"worker.js\"\ncompatibility_date = \"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN = \"https://%s\"\n' % (sys.argv[1], sys.argv[2])
-open('/tmp/cf-pla/wrangler.toml','w').write(toml)
-" "$PMA_WORKER" "$PLA_TUNNEL_HOST"
+          import sys
+          toml = 'name = \"%s\"\nmain = \"worker.js\"\ncompatibility_date = \"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN = \"https://%s\"\n' % (sys.argv[1], sys.argv[2])
+          open('/tmp/cf-pla/wrangler.toml','w').write(toml)
+          " "$PMA_WORKER" "$PLA_TUNNEL_HOST"
           cd /tmp/cf-pla && wrangler deploy --minify
           echo "PLA Worker 배포 완료: ${PMA_WORKER}"
 
@@ -474,13 +463,7 @@ open('/tmp/cf-pla/wrangler.toml','w').write(toml)
           set_secret() {
             local NAME="$1" VALUE="$2"
             [ -z "$VALUE" ] && return
-            ENC=$(python3 -c "
-import sys, base64
-from nacl import encoding, public
-pub = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder)
-enc = public.SealedBox(pub).encrypt(sys.argv[2].encode())
-print(base64.b64encode(enc).decode())
-" "$PUB_KEY" "$VALUE" 2>/dev/null)
+            ENC=$(python3 -c "import sys, base64; from nacl import encoding, public; pub = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder); enc = public.SealedBox(pub).encrypt(sys.argv[2].encode()); print(base64.b64encode(enc).decode())" "$PUB_KEY" "$VALUE" 2>/dev/null)
             CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
               -X PUT \
               -H "Authorization: Bearer ${GH_PAT}" \
@@ -502,24 +485,27 @@ print(base64.b64encode(enc).decode())
           CALLBACK="${{ inputs.wpspot_callback_url }}"
           SITE_ID="${{ inputs.wpspot_site_id }}"
           JWT="${{ inputs.wpspot_jwt }}"
-          [ -z "$CALLBACK" ] || [ -z "$SITE_ID" ] || [ -z "$JWT" ] && { echo "콜백 정보 없음"; exit 0; }
+          if [ -z "$CALLBACK" ] || [ -z "$SITE_ID" ] || [ -z "$JWT" ]; then
+            echo "콜백 정보 없음 — 건너뜀"
+            exit 0
+          fi
           python3 -c "
-import json, sys, urllib.request
-payload = json.dumps({
-  'siteId': sys.argv[1],
-  'tunnelWpUrl': 'https://' + sys.argv[2],
-  'tunnelPlaUrl': 'https://' + sys.argv[3],
-  'workerUrl': sys.argv[4],
-  'status': 'active'
-}).encode()
-req = urllib.request.Request(sys.argv[5], data=payload,
-  headers={'Authorization':'Bearer '+sys.argv[6],'Content-Type':'application/json'}, method='POST')
-try:
-  r = urllib.request.urlopen(req, timeout=10)
-  print('콜백 응답:', r.status)
-except Exception as e:
-  print('콜백 오류:', e)
-" "$SITE_ID" "${WP_TUNNEL_HOST:-}" "${PLA_TUNNEL_HOST:-}" "${WORKER_URL:-}" "$CALLBACK" "$JWT"
+          import json, sys, urllib.request
+          payload = json.dumps({
+            'siteId': sys.argv[1],
+            'tunnelWpUrl': 'https://' + sys.argv[2],
+            'tunnelPlaUrl': 'https://' + sys.argv[3],
+            'workerUrl': sys.argv[4],
+            'status': 'active'
+          }).encode()
+          req = urllib.request.Request(sys.argv[5], data=payload,
+            headers={'Authorization':'Bearer '+sys.argv[6],'Content-Type':'application/json'}, method='POST')
+          try:
+            r = urllib.request.urlopen(req, timeout=10)
+            print('콜백 응답:', r.status)
+          except Exception as e:
+            print('::warning::콜백 실패:', e)
+          " "$SITE_ID" "${WP_TUNNEL_HOST:-}" "${PLA_TUNNEL_HOST:-}" "${WORKER_URL:-}" "$CALLBACK" "$JWT"
 
       - name: 변경사항 커밋 및 푸시
         run: |
