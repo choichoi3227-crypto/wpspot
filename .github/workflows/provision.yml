@@ -54,6 +54,14 @@ on:
         description: "wpspot JWT"
         required: false
         default: ""
+      upstash_redis_url:
+        description: "Upstash Redis REST URL (선택)"
+        required: false
+        default: ""
+      upstash_redis_token:
+        description: "Upstash Redis REST Token (선택)"
+        required: false
+        default: ""
 
 jobs:
   provision:
@@ -70,6 +78,8 @@ jobs:
           echo "::add-mask::${{ inputs.secret_cf_api_token }}"
           echo "::add-mask::${{ inputs.secret_github_token }}"
           echo "::add-mask::${{ inputs.wpspot_jwt }}"
+          echo "::add-mask::${{ inputs.upstash_redis_url }}"
+          echo "::add-mask::${{ inputs.upstash_redis_token }}"
 
       - name: 코드 체크아웃
         uses: actions/checkout@v4
@@ -144,19 +154,22 @@ jobs:
           );
           PHPEOF
 
-      - name: wp-config.php 생성
+      - name: wp-config.php 생성 (Redis 포함)
         run: |
           cd wordpress
           CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
           SITE_URL="${CUSTOM_DOMAIN:+https://${CUSTOM_DOMAIN}}"
           SITE_URL="${SITE_URL:-https://${{ inputs.site_slug }}.wpspot.app}"
           SALTS=$(curl -sS https://api.wordpress.org/secret-key/1.1/salt/ || true)
+          UPSTASH_URL="${{ inputs.upstash_redis_url }}"
+          UPSTASH_TOKEN="${{ inputs.upstash_redis_token }}"
+
           cat > wp-config.php << PHPEOF
           <?php
           define("DB_NAME",     "wordpress");
           define("DB_USER",     "root");
           define("DB_PASSWORD", "");
-          define("DB_HOST",     "localhost");
+          define("DB_HOST",     "sqlite");
           define("DB_CHARSET",  "utf8mb4");
           define("DB_COLLATE",  "");
           define("DB_DIR",  __DIR__ . "/wp-content/database/");
@@ -169,6 +182,16 @@ jobs:
           define("CONCATENATE_SCRIPTS", false);
           define("DISALLOW_FILE_EDIT",  false);
           define("FS_METHOD",           "direct");
+          // Upstash Redis (서버리스 Redis 캐시)
+          define("WP_REDIS_CLIENT",   "predis");
+          define("WP_REDIS_SCHEME",   "https");
+          define("WP_REDIS_HOST",     "${UPSTASH_URL}");
+          define("WP_REDIS_PASSWORD", "${UPSTASH_TOKEN}");
+          define("WP_REDIS_PORT",     443);
+          define("WP_REDIS_DATABASE", 0);
+          define("WP_REDIS_TIMEOUT",  1);
+          define("WP_REDIS_READ_TIMEOUT", 1);
+          define("WP_REDIS_DISABLED", ${UPSTASH_URL:+false}${UPSTASH_URL:-true});
           \$table_prefix = "wp_";
           ${SALTS}
           if(!defined("ABSPATH")){define("ABSPATH",__DIR__."/");}
@@ -206,43 +229,100 @@ jobs:
             wp plugin activate sqlite-database-integration --allow-root || true
             wp option update permalink_structure '/%postname%/' --allow-root
             wp rewrite flush --allow-root
+
+            # Redis Object Cache 플러그인 설치 (Upstash 호환)
+            UPSTASH_URL="${{ inputs.upstash_redis_url }}"
+            if [ -n "$UPSTASH_URL" ]; then
+              wp plugin install redis-cache --activate --allow-root || true
+              wp redis enable --allow-root || true
+              echo "Redis Object Cache 활성화 완료"
+            fi
           fi
           ls -lh wp-content/database/wordpress.db
 
-      - name: WordPress PHP 내장 서버 시작 (포트 8888)
+      - name: wp-router.php 생성
         run: |
           cat > /tmp/wp-router.php << 'PHPEOF'
           <?php
-          $docroot = $_SERVER["DOCUMENT_ROOT"] !== "" ? $_SERVER["DOCUMENT_ROOT"] : getcwd();
+          $docroot = ($_SERVER["DOCUMENT_ROOT"] !== "" && $_SERVER["DOCUMENT_ROOT"] !== false)
+              ? $_SERVER["DOCUMENT_ROOT"] : getcwd();
           $uri = urldecode(parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH));
-          $file = $docroot . $uri;
+          $file = rtrim($docroot, '/') . '/' . ltrim($uri, '/');
           if ($uri !== "/" && file_exists($file) && !is_dir($file)) { return false; }
           chdir($docroot);
-          if (file_exists($docroot . "/wp-blog-header.php")) {
-              require $docroot . "/wp-blog-header.php";
+          $hdr = $docroot . "/wp-blog-header.php";
+          if (file_exists($hdr)) {
+              require $hdr;
           } else {
-              http_response_code(503); echo "WordPress not found";
+              http_response_code(503);
+              echo "WordPress not found in: " . $docroot;
           }
           PHPEOF
-          cd wordpress
-          php -S 0.0.0.0:8888 /tmp/wp-router.php \
-            -d display_errors=0 -d log_errors=1 \
-            >> /tmp/php-wp.log 2>&1 &
-          echo $! > /tmp/php-wp.pid
-          sleep 3
-          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:8888/ || echo "000")
-          echo "WordPress PHP 서버: $CODE"
-          [ "$CODE" = "000" ] && { echo "::warning::PHP 서버 응답 없음"; tail -20 /tmp/php-wp.log; }
 
-      - name: PHPLiteAdmin PHP 내장 서버 시작 (포트 8889)
+      - name: WordPress PHP 서버 시작 (메인 2개 + 서브 8개 대기)
+        run: |
+          # 포트 배열: 8888(main1), 8889(main2), 8890~8897(sub1~sub8)
+          PORTS=(8888 8889 8890 8891 8892 8893 8894 8895 8896 8897)
+          MAIN_PORTS=(8888 8889)
+
+          mkdir -p /tmp/php-servers
+
+          start_php_server() {
+            local PORT=$1
+            local LABEL=$2
+            cd "$(pwd)/wordpress" 2>/dev/null || cd wordpress
+            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+              -d display_errors=0 -d log_errors=1 \
+              -d memory_limit=256M \
+              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+            echo $! > "/tmp/php-servers/php-${PORT}.pid"
+            cd -
+            echo "PHP 서버 ${LABEL} 시작 (포트 ${PORT}, PID=$(cat /tmp/php-servers/php-${PORT}.pid))"
+          }
+
+          # 메인 서버 2개 즉시 시작
+          start_php_server 8888 "main-1"
+          start_php_server 8889 "main-2"
+          sleep 3
+
+          # 메인 서버 상태 확인
+          for PORT in "${MAIN_PORTS[@]}"; do
+            HOST_IP=$(hostname -I | awk '{print $1}')
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://${HOST_IP}:${PORT}/" 2>/dev/null || \
+                   curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://0.0.0.0:${PORT}/" 2>/dev/null || echo "000")
+            echo "WordPress PHP 서버 포트 ${PORT}: ${CODE}"
+            if [ "$CODE" = "000" ]; then
+              echo "::warning::PHP 서버 포트 ${PORT} 응답 없음 — 재시작 시도"
+              kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
+              sleep 1
+              start_php_server ${PORT} "main-retry"
+              sleep 3
+            fi
+          done
+
+          # 서브 서버(8890~8897)는 대기 상태로만 저장 (keepalive에서 필요시 활성화)
+          for PORT in 8890 8891 8892 8893 8894 8895 8896 8897; do
+            echo "SUB_PORT_${PORT}=standby" >> /tmp/php-servers/sub-ports.env
+          done
+
+          # 포트 배열을 config에 저장
+          echo "MAIN_PORTS=8888,8889" >> $GITHUB_ENV
+          echo "ALL_PORTS=8888,8889,8890,8891,8892,8893,8894,8895,8896,8897" >> $GITHUB_ENV
+          echo "WP_PORT=8888" >> $GITHUB_ENV
+
+      - name: PHPLiteAdmin PHP 서버 시작 (포트 8999)
         run: |
           PLA_DIR="$(pwd)/wordpress/wp-content/phpliteadmin"
+          HOST_IP=$(hostname -I | awk '{print $1}')
           cd "$PLA_DIR"
-          php -S 0.0.0.0:8889 -d display_errors=0 -d log_errors=1 \
+          php -S "0.0.0.0:8999" -d display_errors=0 -d log_errors=1 \
             >> /tmp/php-pla.log 2>&1 &
+          echo $! > /tmp/php-pla.pid
+          cd -
           sleep 2
-          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:8889/ || echo "000")
-          echo "PHPLiteAdmin PHP 서버: $CODE"
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://${HOST_IP}:8999/" 2>/dev/null || echo "000")
+          echo "PHPLiteAdmin PHP 서버: ${CODE}"
+          echo "PLA_PORT=8999" >> $GITHUB_ENV
 
       - name: cloudflared 설치
         run: |
@@ -314,7 +394,10 @@ jobs:
           python3 -c "
           import json, sys
           data = {
-            'wp_port': 8888, 'pla_port': 8889,
+            'wp_port': 8888, 'wp_port_2': 8889, 'pla_port': 8999,
+            'main_ports': [8888, 8889],
+            'sub_ports': [8890, 8891, 8892, 8893, 8894, 8895, 8896, 8897],
+            'all_ports': [8888, 8889, 8890, 8891, 8892, 8893, 8894, 8895, 8896, 8897],
             'wordpress_dir': 'wordpress',
             'pla_dir': 'wordpress/wp-content/phpliteadmin',
             'worker_name': sys.argv[1],
@@ -340,31 +423,63 @@ jobs:
           echo "WORKER_NAME=${WORKER_NAME}"             >> $GITHUB_ENV
           echo "PMA_WORKER=${WORKER_NAME}-pma"          >> $GITHUB_ENV
 
-      - name: Named Tunnel 연결 (WordPress)
+      - name: Named Tunnel 연결 (WordPress — 메인 포트 자동 페일오버)
         run: |
           [ "${CF_CREDS_OK}" != "true" ] && { echo "건너뜀"; exit 0; }
+
+          HOST_IP=$(hostname -I | awk '{print $1}')
+
+          # 활성 메인 포트 찾기 (8888 → 8889 순)
+          ACTIVE_PORT=8888
+          for P in 8888 8889; do
+            C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${P}/" 2>/dev/null || echo "000")
+            if [ "$C" != "000" ]; then ACTIVE_PORT=$P; break; fi
+          done
+          echo "터널 연결 대상 포트: ${ACTIVE_PORT}"
+
+          # cloudflared는 내부 IP로 연결 (0.0.0.0 바인딩 → 실제 IP 사용)
           cloudflared tunnel --no-autoupdate run \
             --token "${WP_TUNNEL_TOKEN}" \
-            --url http://127.0.0.1:8888 \
+            --url "http://${HOST_IP}:${ACTIVE_PORT}" \
             --logfile /tmp/cf-wp-named.log 2>&1 &
+          CF_PID=$!
+          echo $CF_PID > /tmp/cf-wp.pid
           sleep 5
+
           CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp-named.log 2>/dev/null || echo "0")
           echo "WP Named Tunnel 연결: $CONN"
           echo "WP 터널 URL: https://${WP_TUNNEL_HOST}"
+
+          # 연결 실패 시 재시도
+          if [ "$CONN" = "0" ]; then
+            echo "::warning::터널 연결 실패 — 5초 후 재시도"
+            kill $CF_PID 2>/dev/null || true
+            sleep 5
+            cloudflared tunnel --no-autoupdate run \
+              --token "${WP_TUNNEL_TOKEN}" \
+              --url "http://${HOST_IP}:${ACTIVE_PORT}" \
+              --logfile /tmp/cf-wp-named.log 2>&1 &
+            echo $! > /tmp/cf-wp.pid
+            sleep 5
+            CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp-named.log 2>/dev/null || echo "0")
+            echo "재시도 후 터널 연결: $CONN"
+          fi
 
       - name: Named Tunnel 연결 (PHPLiteAdmin)
         run: |
           [ "${CF_CREDS_OK}" != "true" ] && exit 0
           [ -z "$PLA_TUNNEL_TOKEN" ] && exit 0
+          HOST_IP=$(hostname -I | awk '{print $1}')
           cloudflared tunnel --no-autoupdate run \
             --token "${PLA_TUNNEL_TOKEN}" \
-            --url http://127.0.0.1:8889 \
+            --url "http://${HOST_IP}:8999" \
             --logfile /tmp/cf-pla-named.log 2>&1 &
+          echo $! > /tmp/cf-pla.pid
           sleep 3
           CONN=$(grep -c "Registered tunnel connection" /tmp/cf-pla-named.log 2>/dev/null || echo "0")
           echo "PLA Named Tunnel 연결: $CONN"
 
-      - name: Cloudflare Worker 배포 (고정 hostname)
+      - name: Cloudflare Worker 배포 (고정 hostname + Redis 헤더)
         env:
           CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
@@ -390,6 +505,7 @@ jobs:
                   body:[\"GET\",\"HEAD\"].includes(request.method)?undefined:request.body,redirect:\"manual\"});
                 const out = new Headers(r.headers);
                 out.set('x-powered-by','wpspot/serverless');
+                out.set('x-cache-status', out.get('x-redis-status') || 'miss');
                 return new Response(r.body, {status:r.status, headers:out});
               } catch(e) {
                 return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html; charset=utf-8','Retry-After':'60'}});
@@ -443,7 +559,7 @@ jobs:
           cd /tmp/cf-pla && wrangler deploy --minify
           echo "PLA Worker 배포 완료: ${PMA_WORKER}"
 
-      - name: GitHub Secrets 등록 (Tunnel Token + CF 자격증명)
+      - name: GitHub Secrets 등록 (Tunnel Token + CF 자격증명 + Redis)
         env:
           GH_PAT: ${{ inputs.secret_github_token }}
         run: |
@@ -474,10 +590,12 @@ jobs:
             [ "$CODE" = "201" ] || [ "$CODE" = "204" ] && echo "✓ $NAME" || echo "✗ $NAME ($CODE)"
           }
 
-          set_secret "CF_ACCOUNT_ID"    "${{ inputs.secret_cf_account_id }}"
-          set_secret "CF_API_TOKEN"     "${{ inputs.secret_cf_api_token }}"
-          set_secret "WP_TUNNEL_TOKEN"  "${WP_TUNNEL_TOKEN}"
-          set_secret "PLA_TUNNEL_TOKEN" "${PLA_TUNNEL_TOKEN}"
+          set_secret "CF_ACCOUNT_ID"      "${{ inputs.secret_cf_account_id }}"
+          set_secret "CF_API_TOKEN"        "${{ inputs.secret_cf_api_token }}"
+          set_secret "WP_TUNNEL_TOKEN"     "${WP_TUNNEL_TOKEN}"
+          set_secret "PLA_TUNNEL_TOKEN"    "${PLA_TUNNEL_TOKEN}"
+          set_secret "UPSTASH_REDIS_URL"   "${{ inputs.upstash_redis_url }}"
+          set_secret "UPSTASH_REDIS_TOKEN" "${{ inputs.upstash_redis_token }}"
           echo "Secrets 등록 완료"
 
       - name: wpspot 콜백
@@ -522,16 +640,51 @@ jobs:
           echo "  wpspot 프로비저닝 완료"
           echo "============================================"
           DOMAIN="${{ inputs.custom_domain }}"
-          [ -n "$DOMAIN" ] && echo "  사이트:     https://${DOMAIN}"
-          echo "  WP 터널:    https://${WP_TUNNEL_HOST:-없음}"
-          echo "  PLA 터널:   https://${PLA_TUNNEL_HOST:-없음}"
-          echo "  Worker URL: ${WORKER_URL:-없음}"
-          echo "  터널 방식:  Named Tunnel (영구 hostname)"
-          echo "  엔진:       PHP 8.3 내장 서버"
-          echo "  DB:         SQLite"
+          [ -n "$DOMAIN" ] && echo "  사이트:      https://${DOMAIN}"
+          echo "  WP 터널:     https://${WP_TUNNEL_HOST:-없음}"
+          echo "  PLA 터널:    https://${PLA_TUNNEL_HOST:-없음}"
+          echo "  Worker URL:  ${WORKER_URL:-없음}"
+          echo "  PHP 서버:    포트 8888(main-1), 8889(main-2)"
+          echo "               포트 8890~8897(sub, keepalive에서 활성화)"
+          echo "  Redis:       ${{ inputs.upstash_redis_url != '' && 'Upstash 서버리스 Redis 연결됨' || '미사용' }}"
+          echo "  터널 방식:   Named Tunnel (영구 hostname)"
+          echo "  엔진:        PHP 8.3 내장 서버 × 최대 10개"
+          echo "  DB:          SQLite"
           echo "============================================"
 
-      - name: 서버 유지 (keepalive 인계 전 360초)
+      - name: 서버 유지 (keepalive 인계 전 360초 — 다운 절대 금지)
         run: |
           echo "Named Tunnel + PHP 서버 유지 중..."
-          sleep 360
+          HOST_IP=$(hostname -I | awk '{print $1}')
+
+          keep_alive_servers() {
+            # 메인 서버 상태 확인 및 자동 복구
+            for PORT in 8888 8889; do
+              PID_FILE="/tmp/php-servers/php-${PORT}.pid"
+              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              if [ "$CODE" = "000" ]; then
+                echo "[복구] PHP 서버 포트 ${PORT} 재시작"
+                kill "$(cat $PID_FILE 2>/dev/null)" 2>/dev/null || true
+                sleep 1
+                cd wordpress
+                php -S "0.0.0.0:${PORT}" /tmp/wp-router.php -d display_errors=0 \
+                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+                echo $! > "$PID_FILE"
+                cd -
+                sleep 2
+              fi
+            done
+            # 터널 상태 확인
+            if ! kill -0 "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null; then
+              echo "[복구] WP 터널 재시작"
+              [ -n "${WP_TUNNEL_TOKEN}" ] && cloudflared tunnel --no-autoupdate run \
+                --token "${WP_TUNNEL_TOKEN}" --url "http://${HOST_IP}:8888" \
+                --logfile /tmp/cf-wp-named.log 2>&1 & echo $! > /tmp/cf-wp.pid
+            fi
+          }
+
+          for i in 1 2 3 4 5 6; do
+            sleep 60
+            keep_alive_servers
+            echo "[${i}분] 서버 유지 중..."
+          done
