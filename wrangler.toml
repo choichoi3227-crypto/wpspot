@@ -27,9 +27,14 @@ APP_NAME = "wpspot"
 APP_ENV  = "production"
 
 # Worker 자신의 공개 URL (콜백 URL 생성용)
-# 배포 후 실제 URL로 업데이트: wrangler.toml 또는 wrangler secret put
-# 기본값: workers.dev URL 자동 사용
 WPSPOT_BASE_URL = "https://cloud-press.co.kr"
+
+# Upstash 서버리스 Redis (선택사항 — 모든 WordPress 사이트에 Redis Object Cache 적용)
+# wrangler secret put UPSTASH_REDIS_URL    → https://xxx.upstash.io
+# wrangler secret put UPSTASH_REDIS_TOKEN  → 토큰 문자열
+# 미설정 시: Redis 미사용 (WordPress 정상 동작은 보장됨)
+UPSTASH_REDIS_URL   = ""
+UPSTASH_REDIS_TOKEN = ""
 
 [observability]
 enabled = false
