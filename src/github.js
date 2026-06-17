@@ -26,30 +26,16 @@ export async function createRepo(token, repoName) {
       name: repoName,
       private: true,
       auto_init: true,
-      description: "wpspot — WordPress hosting (Cloudflare Workers + PHP + SQLite)",
+      description: "wpspot — WordPress hosting (nginx + PHP-FPM + SQLite)",
     }),
   });
   if (!res.ok && res.status !== 422) {
     const text = await res.text();
     throw new Error(`GitHub 레포 생성 실패: ${res.status} ${text}`);
   }
-
-  // 422 = 이미 존재하는 레포 — repoData가 없을 수 있으므로 API로 직접 조회
-  let repoData = await res.json().catch(() => ({}));
-  const ghUser = repoData.owner?.login
-    ? repoData.owner.login
-    : await (async () => {
-        const u = await fetch(`${GITHUB_API}/user`, { headers: ghHeaders(token) });
-        return u.ok ? (await u.json()).login : null;
-      })();
-  const owner = ghUser;
+  const repoData = await res.json().catch(() => ({}));
+  const owner = repoData.owner?.login;
   const repo  = repoData.name || repoName;
-
-  // 레포가 이미 있었으면 최신 데이터 가져오기
-  if (!repoData.owner) {
-    const r = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers: ghHeaders(token) });
-    if (r.ok) repoData = await r.json();
-  }
 
   // auto_init 커밋이 실제로 생성될 때까지 최대 30초 폴링
   if (owner) {
@@ -60,7 +46,7 @@ export async function createRepo(token, repoName) {
       });
       if (r.ok) {
         const commits = await r.json().catch(() => []);
-        if (Array.isArray(commits) && commits.length > 0) break;
+        if (Array.isArray(commits) && commits.length > 0) break; // 초기 커밋 확인
       }
       await new Promise(r => setTimeout(r, 2000));
     }
@@ -71,8 +57,15 @@ export async function createRepo(token, repoName) {
 
 export async function getAuthenticatedUser(token) {
   const res = await fetch(`${GITHUB_API}/user`, { headers: ghHeaders(token) });
-  if (!res.ok) throw new Error(`GitHub 사용자 정보 조회 실패: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GitHub 사용자 정보 조회 실패: ${res.status}${text ? ` ${text}` : ""}`);
+  }
+  const data = await res.json();
+  // Classic PAT는 이 헤더로 부여된 스코프를 알려줌 (Fine-grained PAT는 헤더가 없음 — 정상)
+  const scopesHeader = res.headers.get("x-oauth-scopes") || "";
+  data._scopes = scopesHeader.split(",").map(s => s.trim()).filter(Boolean);
+  return data;
 }
 
 // default_branch 확인 헬퍼 — 브랜치에 실제 커밋이 있을 때만 반환
@@ -111,7 +104,7 @@ export async function createInitialCommit(token, owner, repo, files, message = "
 
     const body = {
       message: `${message} — ${path}`,
-      content: toBase64(content || " "),
+      content: toBase64(content),
       branch: defaultBranch,
     };
     if (sha) body.sha = sha;
