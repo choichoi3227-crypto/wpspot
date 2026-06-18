@@ -5,11 +5,11 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
-# Named Tunnel 방식:
-# - WP_TUNNEL_TOKEN / PLA_TUNNEL_TOKEN Secret으로 동일 tunnel에 재연결
-# - hostname 고정 → Worker 재배포 불필요
-# - PHP 서버: 메인 2개(8888,8889) 항상 실행, 서브(8890~8897) 부하 시 자동 활성화
-# - 5개 job × 60초 offset → 매 60초마다 롤링 커버 — 서버/터널 절대 다운 없음
+# 구조:
+# - 5개 job이 각각 60초 offset으로 실행 → 매 60초마다 롤링 커버
+# - 각 job: PHP 서버(메인 2개) + cloudflared Named Tunnel 재연결
+# - 서버/터널 절대 다운 없음 보장
+# - 0.0.0.0 바인딩, curl/터널은 HOST_IP(실제 IP) 사용
 
 jobs:
   keepalive-0:
@@ -22,115 +22,112 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, intl, opcache
+          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
 
       - name: 설정 로드
+        id: cfg
         run: |
           CFG="deploy/tunnel-config.json"
           if [ -f "$CFG" ]; then
-            WP_PORT=$(python3  -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))")
+            WP_PORT=$(python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))")
             WP_PORT2=$(python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))")
             PLA_PORT=$(python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8999))")
-            WP_DIR=$(python3   -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))")
-            PLA_DIR=$(python3  -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))")
-            MAIN_PORTS=$(python3 -c "import json; print(','.join(str(p) for p in json.load(open('$CFG')).get('main_ports',[8888,8889])))")
-            SUB_PORTS=$(python3 -c "import json; print(','.join(str(p) for p in json.load(open('$CFG')).get('sub_ports',[])))")
+            WP_DIR=$(python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))")
+            PLA_DIR=$(python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))")
           else
             WP_PORT=8888; WP_PORT2=8889; PLA_PORT=8999
-            WP_DIR=wordpress; PLA_DIR=wordpress/wp-content/phpliteadmin
-            MAIN_PORTS="8888,8889"; SUB_PORTS=""
+            WP_DIR=wordpress
+            PLA_DIR=wordpress/wp-content/phpliteadmin
           fi
-          echo "WP_PORT=$WP_PORT"     >> $GITHUB_ENV
-          echo "WP_PORT2=$WP_PORT2"   >> $GITHUB_ENV
-          echo "PLA_PORT=$PLA_PORT"   >> $GITHUB_ENV
-          echo "WP_DIR=$WP_DIR"       >> $GITHUB_ENV
-          echo "PLA_DIR=$PLA_DIR"     >> $GITHUB_ENV
-          echo "MAIN_PORTS=$MAIN_PORTS" >> $GITHUB_ENV
-          echo "SUB_PORTS=$SUB_PORTS"   >> $GITHUB_ENV
+          echo "WP_PORT=$WP_PORT"   >> $GITHUB_ENV
+          echo "WP_PORT2=$WP_PORT2" >> $GITHUB_ENV
+          echo "PLA_PORT=$PLA_PORT" >> $GITHUB_ENV
+          echo "WP_DIR=$WP_DIR"     >> $GITHUB_ENV
+          echo "PLA_DIR=$PLA_DIR"   >> $GITHUB_ENV
+          echo "REPO_ROOT=$(pwd)"   >> $GITHUB_ENV
 
-      - name: WordPress 라우터 생성
+      - name: wp-router.php 생성
         run: |
-          cat > /tmp/wp-router.php << 'PHPEOF'
-          <?php
-          $d = ($_SERVER["DOCUMENT_ROOT"] !== "" && $_SERVER["DOCUMENT_ROOT"] !== false)
-              ? $_SERVER["DOCUMENT_ROOT"] : getcwd();
-          $uri = urldecode(parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH));
-          $f = rtrim($d, '/') . '/' . ltrim($uri, '/');
-          if ($uri !== "/" && file_exists($f) && !is_dir($f)) { return false; }
-          chdir($d);
-          $hdr = $d . "/wp-blog-header.php";
-          if (file_exists($hdr)) { require $hdr; }
-          else { http_response_code(503); echo "WordPress not found"; }
-          PHPEOF
+          cat > /tmp/wp-router.php << 'ROUTEREOF'
+<?php
+$docroot = ($_SERVER['DOCUMENT_ROOT'] !== '' && $_SERVER['DOCUMENT_ROOT'] !== false)
+    ? $_SERVER['DOCUMENT_ROOT'] : getcwd();
+$uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
+$file = rtrim($docroot, '/') . '/' . ltrim($uri, '/');
+if ($uri !== '/' && file_exists($file) && !is_dir($file)) {
+    return false;
+}
+chdir($docroot);
+$header = $docroot . '/wp-blog-header.php';
+if (file_exists($header)) {
+    require $header;
+} else {
+    http_response_code(503);
+    echo 'WordPress not found in: ' . $docroot;
+}
+ROUTEREOF
 
-      - name: PHP 서버 시작 (메인 2개 — 절대 다운 금지)
+      - name: PHP 서버 시작 (메인 2개 + PLA)
         run: |
-          [ ! -d "$WP_DIR" ] && { echo "::warning::wordpress 디렉토리 없음"; exit 0; }
           HOST_IP=$(hostname -I | awk '{print $1}')
           mkdir -p /tmp/php-servers
+          ABS_WP_DIR="${REPO_ROOT}/${WP_DIR}"
+          ABS_PLA_DIR="${REPO_ROOT}/${PLA_DIR}"
 
-          start_wp_server() {
+          start_wp() {
             local PORT=$1
-            cd "$WP_DIR"
+            [ ! -d "$ABS_WP_DIR" ] && echo "::warning::WP 디렉토리 없음: $ABS_WP_DIR" && return
             php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+              -t "${ABS_WP_DIR}" \
               -d display_errors=0 -d log_errors=1 -d memory_limit=256M \
               >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
             echo $! > "/tmp/php-servers/php-${PORT}.pid"
-            cd -
           }
 
-          # 메인 포트 2개 항상 시작
-          for PORT in $WP_PORT $WP_PORT2; do
-            start_wp_server $PORT
-          done
+          start_wp $WP_PORT
+          start_wp $WP_PORT2
+          [ -d "$ABS_PLA_DIR" ] && {
+            php -S "0.0.0.0:${PLA_PORT}" \
+              -t "${ABS_PLA_DIR}" \
+              -d display_errors=0 -d log_errors=1 \
+              >> /tmp/php-pla.log 2>&1 &
+            echo $! > /tmp/php-pla.pid
+          }
           sleep 3
 
-          # 상태 확인 및 복구
+          # 상태 확인
           for PORT in $WP_PORT $WP_PORT2; do
             CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 8 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-            echo "WP 서버 포트 ${PORT}: $CODE"
+            echo "[keepalive-0] WP 포트 ${PORT}: ${CODE}"
             if [ "$CODE" = "000" ]; then
               echo "::warning::포트 ${PORT} 응답 없음 — 재시작"
               kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
               sleep 1
-              start_wp_server $PORT
+              start_wp $PORT
               sleep 3
+              CODE2=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 8 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              echo "[keepalive-0] 재시작 후 포트 ${PORT}: ${CODE2}"
             fi
           done
 
-          # 서브 포트 부하 감지 시 활성화 (응답 지연 > 2초이면 추가 서버 실행)
-          LOAD=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',')
-          LOAD_INT=$(echo "$LOAD" | awk '{print int($1)}')
-          if [ "${LOAD_INT:-0}" -ge 2 ] && [ -n "$SUB_PORTS" ]; then
-            ACTIVE_SUB=0
-            IFS=',' read -ra SUBS <<< "$SUB_PORTS"
-            for PORT in "${SUBS[@]}"; do
-              [ $ACTIVE_SUB -ge 3 ] && break  # 최대 3개 서브 서버 추가
+          # 부하 시 서브 서버 자동 활성화 (최대 3개 추가)
+          LOAD_INT=$(uptime | awk -F'load average:' '{print $2}' | awk '{printf "%d", $1}')
+          if [ "${LOAD_INT:-0}" -ge 2 ]; then
+            ACTIVE=0
+            for PORT in 8890 8891 8892 8893 8894 8895 8896 8897; do
+              [ $ACTIVE -ge 3 ] && break
               CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 3 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
               if [ "$CODE" = "000" ]; then
-                start_wp_server $PORT
-                ACTIVE_SUB=$((ACTIVE_SUB+1))
-                echo "서브 서버 추가: 포트 ${PORT}"
-                sleep 2
+                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+                  -t "${ABS_WP_DIR}" -d display_errors=0 \
+                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+                echo $! > "/tmp/php-servers/php-${PORT}.pid"
+                ACTIVE=$((ACTIVE+1))
+                echo "[keepalive-0] 서브 서버 추가: 포트 ${PORT}"
+                sleep 1
               fi
             done
           fi
-
-      - name: PHP 서버 시작 (PHPLiteAdmin)
-        run: |
-          [ ! -d "$PLA_DIR" ] && { echo "::warning::PHPLiteAdmin 디렉토리 없음"; exit 0; }
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PLA_PORT}/" 2>/dev/null || echo "000")
-          if [ "$CODE" = "000" ]; then
-            cd "$PLA_DIR"
-            php -S "0.0.0.0:${PLA_PORT}" -d display_errors=0 -d log_errors=1 \
-              >> /tmp/php-pla.log 2>&1 &
-            echo $! > /tmp/php-pla.pid
-            cd -
-            sleep 2
-            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PLA_PORT}/" 2>/dev/null || echo "000")
-          fi
-          echo "PLA 서버: $CODE"
 
       - name: cloudflared 설치
         run: |
@@ -140,109 +137,73 @@ jobs:
           dpkg -x /tmp/cf.deb /tmp/cf-pkg
           sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-      - name: Named Tunnel 연결 (WordPress — 절대 다운 금지)
+      - name: Named Tunnel 재연결 (WP + PLA)
         env:
           WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-        run: |
-          [ -z "$WP_TUNNEL_TOKEN" ] && { echo "::warning::WP_TUNNEL_TOKEN 없음"; exit 0; }
-          HOST_IP=$(hostname -I | awk '{print $1}')
-
-          # 활성 포트 감지 (메인 1 → 메인 2 순)
-          ACTIVE_PORT=$WP_PORT
-          for PORT in $WP_PORT $WP_PORT2; do
-            C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-            if [ "$C" != "000" ]; then ACTIVE_PORT=$PORT; break; fi
-          done
-
-          cloudflared tunnel --no-autoupdate run \
-            --token "$WP_TUNNEL_TOKEN" \
-            --url "http://${HOST_IP}:${ACTIVE_PORT}" \
-            --logfile /tmp/cf-wp.log 2>&1 &
-          CF_PID=$!
-          echo $CF_PID > /tmp/cf-wp.pid
-          sleep 5
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "WP Named Tunnel 연결: $CONN (포트 ${ACTIVE_PORT})"
-
-          # 실패 시 즉시 재시도
-          if [ "$CONN" = "0" ]; then
-            echo "::warning::터널 연결 실패 — 재시도"
-            kill $CF_PID 2>/dev/null || true
-            sleep 3
-            cloudflared tunnel --no-autoupdate run \
-              --token "$WP_TUNNEL_TOKEN" \
-              --url "http://${HOST_IP}:${ACTIVE_PORT}" \
-              --logfile /tmp/cf-wp.log 2>&1 &
-            echo $! > /tmp/cf-wp.pid
-            sleep 5
-            CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-            echo "재시도 후 터널 연결: $CONN"
-          fi
-
-      - name: Named Tunnel 연결 (PHPLiteAdmin)
-        env:
           PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
         run: |
-          [ -z "$PLA_TUNNEL_TOKEN" ] && { echo "PLA_TUNNEL_TOKEN 없음"; exit 0; }
           HOST_IP=$(hostname -I | awk '{print $1}')
-          cloudflared tunnel --no-autoupdate run \
-            --token "$PLA_TUNNEL_TOKEN" \
-            --url "http://${HOST_IP}:${PLA_PORT}" \
-            --logfile /tmp/cf-pla.log 2>&1 &
-          echo $! > /tmp/cf-pla.pid
-          sleep 3
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-pla.log 2>/dev/null || echo "0")
-          echo "PLA Named Tunnel 연결: $CONN"
 
-      - name: 서버 유지 (270초 — 자동 복구 포함)
-        run: |
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          WP_ROUTER=/tmp/wp-router.php
-
-          recover_server() {
-            local PORT=$1 DIR=$2
-            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-            if [ "$CODE" = "000" ]; then
-              echo "[복구] PHP 서버 포트 ${PORT} 재시작"
-              kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
-              sleep 1
-              cd "$DIR" 2>/dev/null || true
-              php -S "0.0.0.0:${PORT}" $WP_ROUTER -d display_errors=0 \
-                >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-              echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              cd -
-              echo "[복구] 포트 ${PORT} 재시작 완료"
-            fi
-          }
-
-          recover_tunnel() {
-            local TOKEN=$1 PORT=$2 PIDFILE=$3 LOG=$4
-            [ -z "$TOKEN" ] && return
-            if ! kill -0 "$(cat $PIDFILE 2>/dev/null)" 2>/dev/null; then
-              echo "[복구] 터널 재시작 (포트 ${PORT})"
+          connect_tunnel() {
+            local TOKEN=$1 PORT=$2 PIDFILE=$3 LOG=$4 LABEL=$5
+            [ -z "$TOKEN" ] && { echo "::warning::${LABEL} 토큰 없음"; return; }
+            cloudflared tunnel --no-autoupdate run \
+              --token "$TOKEN" \
+              --url "http://${HOST_IP}:${PORT}" \
+              --logfile "$LOG" 2>&1 &
+            echo $! > "$PIDFILE"
+            sleep 4
+            CONN=$(grep -c "Registered tunnel connection" "$LOG" 2>/dev/null || echo "0")
+            echo "[keepalive-0] ${LABEL} 터널: $CONN"
+            if [ "$CONN" = "0" ]; then
+              echo "::warning::${LABEL} 터널 실패 — 재시도"
+              kill "$(cat $PIDFILE 2>/dev/null)" 2>/dev/null || true
+              sleep 3
               cloudflared tunnel --no-autoupdate run \
                 --token "$TOKEN" --url "http://${HOST_IP}:${PORT}" \
                 --logfile "$LOG" 2>&1 &
               echo $! > "$PIDFILE"
+              sleep 4
             fi
           }
 
-          sleep 90
-          recover_server $WP_PORT "$WP_DIR"
-          recover_server $WP_PORT2 "$WP_DIR"
-          recover_tunnel "${WP_TUNNEL_TOKEN}" $WP_PORT /tmp/cf-wp.pid /tmp/cf-wp.log
-          echo "[90s] 서버 상태 확인 완료"
+          connect_tunnel "$WP_TUNNEL_TOKEN"  $WP_PORT  /tmp/cf-wp.pid  /tmp/cf-wp.log  "WP"
+          connect_tunnel "$PLA_TUNNEL_TOKEN" $PLA_PORT /tmp/cf-pla.pid /tmp/cf-pla.log "PLA"
 
-          sleep 90
-          recover_server $WP_PORT "$WP_DIR"
-          recover_server $WP_PORT2 "$WP_DIR"
-          echo "[180s] 서버 상태 확인 완료"
-
-          sleep 90
-          recover_server $WP_PORT "$WP_DIR"
-          echo "[270s] keepalive-0 완료"
+      - name: 서버 유지 (270초 자동복구)
         env:
           WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
+        run: |
+          HOST_IP=$(hostname -I | awk '{print $1}')
+          ABS_WP_DIR="${REPO_ROOT}/${WP_DIR}"
+
+          check() {
+            for PORT in $WP_PORT $WP_PORT2; do
+              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              if [ "$CODE" = "000" ]; then
+                echo "[복구] 포트 ${PORT} 재시작"
+                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
+                sleep 1
+                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+                  -t "${ABS_WP_DIR}" -d display_errors=0 \
+                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+                echo $! > "/tmp/php-servers/php-${PORT}.pid"
+              else
+                echo "[OK] 포트 ${PORT}: ${CODE}"
+              fi
+            done
+            if ! kill -0 "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null && [ -n "$WP_TUNNEL_TOKEN" ]; then
+              echo "[복구] WP 터널 재시작"
+              cloudflared tunnel --no-autoupdate run \
+                --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
+                --logfile /tmp/cf-wp.log 2>&1 &
+              echo $! > /tmp/cf-wp.pid
+            fi
+          }
+
+          sleep 90;  check; echo "[90s] keepalive-0"
+          sleep 90;  check; echo "[180s] keepalive-0"
+          sleep 90;  echo "keepalive-0 완료"
 
   keepalive-1:
     runs-on: ubuntu-latest
@@ -255,8 +216,7 @@ jobs:
         with:
           php-version: "8.3"
           extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-
-      - name: PHP 서버 + Named Tunnel
+      - name: 서버+터널 유지
         env:
           WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
           PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
@@ -268,33 +228,29 @@ jobs:
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
           PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
+          ABS_WP_DIR="$(pwd)/${WP_DIR}"
+          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
           mkdir -p /tmp/php-servers
 
-          cat > /tmp/wp-router.php << 'PHPEOF'
-          <?php
-          $d=($_SERVER["DOCUMENT_ROOT"]!==""&&$_SERVER["DOCUMENT_ROOT"]!==false)?$_SERVER["DOCUMENT_ROOT"]:getcwd();
-          $uri=urldecode(parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH));
-          $f=rtrim($d,'/').'/'.ltrim($uri,'/');
-          if($uri!=="/"&&file_exists($f)&&!is_dir($f)){return false;}
-          chdir($d);
-          $h=$d."/wp-blog-header.php";
-          if(file_exists($h)){require $h;}else{http_response_code(503);echo "WP not found";}
-          PHPEOF
+          cat > /tmp/wp-router.php << 'ROUTEREOF'
+<?php
+$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
+$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+$f=rtrim($d,'/').'/'.ltrim($uri,'/');
+if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+chdir($d);$h=$d.'/wp-blog-header.php';
+if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
+ROUTEREOF
 
-          for PORT in $WP_PORT $WP_PORT2; do
-            [ -d "$WP_DIR" ] && {
-              cd "$WP_DIR"
-              php -S "0.0.0.0:${PORT}" /tmp/wp-router.php -d display_errors=0 \
-                >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-              echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              cd -
-            }
+          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
+            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
+              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+            echo $! > "/tmp/php-servers/php-${PORT}.pid"
           done
-          [ -d "$PLA_DIR" ] && {
-            cd "$PLA_DIR"
-            php -S "0.0.0.0:${PLA_PORT}" -d display_errors=0 >> /tmp/php-pla.log 2>&1 &
-            echo $! > /tmp/php-pla.pid
-            cd -
+          [ -d "$ABS_PLA_DIR" ] && {
+            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
+              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
           }
           sleep 3
 
@@ -307,45 +263,31 @@ jobs:
           [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
             --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
             --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 5
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "keepalive-1 WP 터널: $CONN"
+          sleep 4
 
-          # 터널 실패 시 재시도
+          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
+          echo "[keepalive-1] WP 터널: $CONN"
           if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
-            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true
-            sleep 3
+            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
             cloudflared tunnel --no-autoupdate run \
               --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
-            sleep 5
+              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
           fi
 
-      - name: 서버 유지 (keepalive-1)
-        env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-        run: |
-          CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          WP_PORT2=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))" || echo 8889)
-          WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
-          HOST_IP=$(hostname -I | awk '{print $1}')
-
-          check_and_recover() {
+          check_ports() {
             for PORT in $WP_PORT $WP_PORT2; do
-              C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              [ "$C" = "000" ] && {
-                echo "[복구] 포트 ${PORT} 재시작"
-                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
-                sleep 1; cd "$WP_DIR"
-                php -S "0.0.0.0:${PORT}" /tmp/wp-router.php -d display_errors=0 \
+              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              [ "$CODE" = "000" ] && {
+                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
+                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+                  -t "${ABS_WP_DIR}" -d display_errors=0 \
                   >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"; cd -
-              } || echo "[OK] 포트 ${PORT}: $C"
+                echo $! > "/tmp/php-servers/php-${PORT}.pid"
+              } || echo "[OK] 포트 ${PORT}: ${CODE}"
             done
           }
-          sleep 90; check_and_recover; echo "[90s] keepalive-1"
-          sleep 90; check_and_recover; echo "[180s] keepalive-1"
+          sleep 90; check_ports; echo "[90s] keepalive-1"
+          sleep 90; check_ports; echo "[180s] keepalive-1"
           sleep 90; echo "keepalive-1 완료"
 
   keepalive-2:
@@ -359,8 +301,7 @@ jobs:
         with:
           php-version: "8.3"
           extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-
-      - name: PHP 서버 + Named Tunnel
+      - name: 서버+터널 유지
         env:
           WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
           PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
@@ -372,23 +313,30 @@ jobs:
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
           PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
+          ABS_WP_DIR="$(pwd)/${WP_DIR}"
+          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
           mkdir -p /tmp/php-servers
 
-          cat > /tmp/wp-router.php << 'PHPEOF'
-          <?php
-          $d=($_SERVER["DOCUMENT_ROOT"]!==""&&$_SERVER["DOCUMENT_ROOT"]!==false)?$_SERVER["DOCUMENT_ROOT"]:getcwd();
-          $uri=urldecode(parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH));
-          $f=rtrim($d,'/').'/'.ltrim($uri,'/');
-          if($uri!=="/"&&file_exists($f)&&!is_dir($f)){return false;}
-          chdir($d);
-          $h=$d."/wp-blog-header.php";
-          if(file_exists($h)){require $h;}else{http_response_code(503);echo "WP not found";}
-          PHPEOF
+          cat > /tmp/wp-router.php << 'ROUTEREOF'
+<?php
+$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
+$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+$f=rtrim($d,'/').'/'.ltrim($uri,'/');
+if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+chdir($d);$h=$d.'/wp-blog-header.php';
+if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
+ROUTEREOF
 
-          for PORT in $WP_PORT $WP_PORT2; do
-            [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S "0.0.0.0:${PORT}" /tmp/wp-router.php -d display_errors=0 >> "/tmp/php-servers/php-${PORT}.log" 2>&1 & echo $! > "/tmp/php-servers/php-${PORT}.pid"; cd -; }
+          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
+            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
+              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+            echo $! > "/tmp/php-servers/php-${PORT}.pid"
           done
-          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S "0.0.0.0:${PLA_PORT}" -d display_errors=0 >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid; cd -; }
+          [ -d "$ABS_PLA_DIR" ] && {
+            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
+              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
+          }
           sleep 3
 
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
@@ -400,16 +348,31 @@ jobs:
           [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
             --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
             --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 5; CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "keepalive-2 WP 터널: $CONN"
+          sleep 4
 
-      - name: 서버 유지 (keepalive-2)
-        run: |
-          CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          sleep 90; C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[90s] $C"
-          sleep 90; C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[180s] $C"
+          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
+          echo "[keepalive-2] WP 터널: $CONN"
+          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
+            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
+            cloudflared tunnel --no-autoupdate run \
+              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
+              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
+          fi
+
+          check_ports() {
+            for PORT in $WP_PORT $WP_PORT2; do
+              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              [ "$CODE" = "000" ] && {
+                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
+                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+                  -t "${ABS_WP_DIR}" -d display_errors=0 \
+                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+                echo $! > "/tmp/php-servers/php-${PORT}.pid"
+              } || echo "[OK] 포트 ${PORT}: ${CODE}"
+            done
+          }
+          sleep 90; check_ports; echo "[90s] keepalive-2"
+          sleep 90; check_ports; echo "[180s] keepalive-2"
           sleep 90; echo "keepalive-2 완료"
 
   keepalive-3:
@@ -423,8 +386,7 @@ jobs:
         with:
           php-version: "8.3"
           extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-
-      - name: PHP 서버 + Named Tunnel
+      - name: 서버+터널 유지
         env:
           WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
           PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
@@ -436,23 +398,30 @@ jobs:
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
           PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
+          ABS_WP_DIR="$(pwd)/${WP_DIR}"
+          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
           mkdir -p /tmp/php-servers
 
-          cat > /tmp/wp-router.php << 'PHPEOF'
-          <?php
-          $d=($_SERVER["DOCUMENT_ROOT"]!==""&&$_SERVER["DOCUMENT_ROOT"]!==false)?$_SERVER["DOCUMENT_ROOT"]:getcwd();
-          $uri=urldecode(parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH));
-          $f=rtrim($d,'/').'/'.ltrim($uri,'/');
-          if($uri!=="/"&&file_exists($f)&&!is_dir($f)){return false;}
-          chdir($d);
-          $h=$d."/wp-blog-header.php";
-          if(file_exists($h)){require $h;}else{http_response_code(503);echo "WP not found";}
-          PHPEOF
+          cat > /tmp/wp-router.php << 'ROUTEREOF'
+<?php
+$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
+$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+$f=rtrim($d,'/').'/'.ltrim($uri,'/');
+if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+chdir($d);$h=$d.'/wp-blog-header.php';
+if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
+ROUTEREOF
 
-          for PORT in $WP_PORT $WP_PORT2; do
-            [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S "0.0.0.0:${PORT}" /tmp/wp-router.php -d display_errors=0 >> "/tmp/php-servers/php-${PORT}.log" 2>&1 & echo $! > "/tmp/php-servers/php-${PORT}.pid"; cd -; }
+          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
+            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
+              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+            echo $! > "/tmp/php-servers/php-${PORT}.pid"
           done
-          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S "0.0.0.0:${PLA_PORT}" -d display_errors=0 >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid; cd -; }
+          [ -d "$ABS_PLA_DIR" ] && {
+            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
+              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
+          }
           sleep 3
 
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
@@ -464,16 +433,31 @@ jobs:
           [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
             --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
             --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 5; CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "keepalive-3 WP 터널: $CONN"
+          sleep 4
 
-      - name: 서버 유지 (keepalive-3)
-        run: |
-          CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          sleep 90; C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[90s] $C"
-          sleep 90; C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[180s] $C"
+          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
+          echo "[keepalive-3] WP 터널: $CONN"
+          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
+            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
+            cloudflared tunnel --no-autoupdate run \
+              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
+              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
+          fi
+
+          check_ports() {
+            for PORT in $WP_PORT $WP_PORT2; do
+              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              [ "$CODE" = "000" ] && {
+                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
+                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+                  -t "${ABS_WP_DIR}" -d display_errors=0 \
+                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+                echo $! > "/tmp/php-servers/php-${PORT}.pid"
+              } || echo "[OK] 포트 ${PORT}: ${CODE}"
+            done
+          }
+          sleep 90; check_ports; echo "[90s] keepalive-3"
+          sleep 90; check_ports; echo "[180s] keepalive-3"
           sleep 90; echo "keepalive-3 완료"
 
   keepalive-4:
@@ -487,8 +471,7 @@ jobs:
         with:
           php-version: "8.3"
           extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-
-      - name: PHP 서버 + Named Tunnel
+      - name: 서버+터널 유지
         env:
           WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
           PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
@@ -500,23 +483,30 @@ jobs:
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
           PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
+          ABS_WP_DIR="$(pwd)/${WP_DIR}"
+          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
           mkdir -p /tmp/php-servers
 
-          cat > /tmp/wp-router.php << 'PHPEOF'
-          <?php
-          $d=($_SERVER["DOCUMENT_ROOT"]!==""&&$_SERVER["DOCUMENT_ROOT"]!==false)?$_SERVER["DOCUMENT_ROOT"]:getcwd();
-          $uri=urldecode(parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH));
-          $f=rtrim($d,'/').'/'.ltrim($uri,'/');
-          if($uri!=="/"&&file_exists($f)&&!is_dir($f)){return false;}
-          chdir($d);
-          $h=$d."/wp-blog-header.php";
-          if(file_exists($h)){require $h;}else{http_response_code(503);echo "WP not found";}
-          PHPEOF
+          cat > /tmp/wp-router.php << 'ROUTEREOF'
+<?php
+$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
+$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
+$f=rtrim($d,'/').'/'.ltrim($uri,'/');
+if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
+chdir($d);$h=$d.'/wp-blog-header.php';
+if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
+ROUTEREOF
 
-          for PORT in $WP_PORT $WP_PORT2; do
-            [ -d "$WP_DIR" ] && { cd "$WP_DIR"; php -S "0.0.0.0:${PORT}" /tmp/wp-router.php -d display_errors=0 >> "/tmp/php-servers/php-${PORT}.log" 2>&1 & echo $! > "/tmp/php-servers/php-${PORT}.pid"; cd -; }
+          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
+            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
+              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+            echo $! > "/tmp/php-servers/php-${PORT}.pid"
           done
-          [ -d "$PLA_DIR" ] && { cd "$PLA_DIR"; php -S "0.0.0.0:${PLA_PORT}" -d display_errors=0 >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid; cd -; }
+          [ -d "$ABS_PLA_DIR" ] && {
+            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
+              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
+          }
           sleep 3
 
           curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
@@ -528,14 +518,29 @@ jobs:
           [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
             --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
             --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 5; CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "keepalive-4 WP 터널: $CONN"
+          sleep 4
 
-      - name: 서버 유지 (keepalive-4)
-        run: |
-          CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          sleep 90; C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[90s] $C"
-          sleep 90; C=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[180s] $C"
+          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
+          echo "[keepalive-4] WP 터널: $CONN"
+          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
+            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
+            cloudflared tunnel --no-autoupdate run \
+              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
+              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
+          fi
+
+          check_ports() {
+            for PORT in $WP_PORT $WP_PORT2; do
+              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+              [ "$CODE" = "000" ] && {
+                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
+                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
+                  -t "${ABS_WP_DIR}" -d display_errors=0 \
+                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
+                echo $! > "/tmp/php-servers/php-${PORT}.pid"
+              } || echo "[OK] 포트 ${PORT}: ${CODE}"
+            done
+          }
+          sleep 90; check_ports; echo "[90s] keepalive-4"
+          sleep 90; check_ports; echo "[180s] keepalive-4"
           sleep 90; echo "keepalive-4 완료"
