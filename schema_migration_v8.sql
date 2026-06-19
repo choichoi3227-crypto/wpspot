@@ -1,13 +1,23 @@
--- schema migration v8 — 서버리스 Redis (Upstash) 지원 추가
+-- schema migration v8 — nginx + PHP-FPM + MariaDB + Redis 7 스택 전환
 -- 실행: wrangler d1 execute <DB_NAME> --file=schema_migration_v8.sql
---
--- 배경: 각 WordPress 사이트에 Upstash Redis Object Cache 연동 여부를 저장한다.
---       provision.yml에서 Upstash URL/Token이 제공된 경우 자동으로 활성화된다.
 
-ALTER TABLE site_credentials ADD COLUMN redis_enabled INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE site_credentials ADD COLUMN redis_provider TEXT DEFAULT NULL;
+-- Redis 활성화 여부 (로컬 Redis 7, 항상 활성)
+ALTER TABLE site_credentials ADD COLUMN redis_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE site_credentials ADD COLUMN redis_provider TEXT DEFAULT 'Redis 7 (로컬, 무료)';
 
--- PHP 서버 포트 목록도 추적 (다중 서버 지원)
-ALTER TABLE site_credentials ADD COLUMN php_main_ports TEXT DEFAULT '8888,8889';
-ALTER TABLE site_credentials ADD COLUMN php_sub_ports  TEXT DEFAULT '8890,8891,8892,8893,8894,8895,8896,8897';
-ALTER TABLE site_credentials ADD COLUMN php_active_ports TEXT DEFAULT '8888,8889';
+-- 스택 정보
+ALTER TABLE site_credentials ADD COLUMN stack TEXT DEFAULT 'nginx+php-fpm+mariadb+redis7';
+
+-- PHP-FPM 포트 (nginx가 upstream으로 관리)
+ALTER TABLE site_credentials ADD COLUMN php_fpm_main_port TEXT DEFAULT '9000';
+ALTER TABLE site_credentials ADD COLUMN php_fpm_sub_port  TEXT DEFAULT '9001';
+
+-- nginx 포트
+ALTER TABLE site_credentials ADD COLUMN nginx_wp_port  TEXT DEFAULT '8080';
+ALTER TABLE site_credentials ADD COLUMN nginx_pma_port TEXT DEFAULT '8081';
+
+-- DB 종류 (SQLite → MariaDB)
+ALTER TABLE site_credentials ADD COLUMN db_type TEXT DEFAULT 'mariadb';
+
+-- DB 백업 경로
+ALTER TABLE site_credentials ADD COLUMN db_backup_path TEXT DEFAULT 'wordpress/db-backup/latest.sql.gz';
