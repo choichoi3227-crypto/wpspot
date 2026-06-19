@@ -29,12 +29,8 @@ APP_ENV  = "production"
 # Worker 자신의 공개 URL (콜백 URL 생성용)
 WPSPOT_BASE_URL = "https://cloud-press.co.kr"
 
-# Upstash 서버리스 Redis (선택사항 — 모든 WordPress 사이트에 Redis Object Cache 적용)
-# wrangler secret put UPSTASH_REDIS_URL    → https://xxx.upstash.io
-# wrangler secret put UPSTASH_REDIS_TOKEN  → 토큰 문자열
-# 미설정 시: Redis 미사용 (WordPress 정상 동작은 보장됨)
-UPSTASH_REDIS_URL   = ""
-UPSTASH_REDIS_TOKEN = ""
+# Redis: GitHub Actions runner에서 로컬 Redis 7을 사용합니다 (무료, 서버리스 Redis 불필요)
+# Redis 비밀번호는 GitHub Secret(REDIS_PASS)으로 자동 관리됩니다.
 
 [observability]
 enabled = false
