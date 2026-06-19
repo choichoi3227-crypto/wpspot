@@ -350,7 +350,7 @@
           </div>
           <div class="field-row">
             <span class="field-label">DB 경로</span>
-            ${fv(pla.dbPath || 'wp-content/database/wordpress.db')}
+            ${fv(pla.dbHost || 'wp-content/database/wordpress.db')}
           </div>
 
           <div style="margin-top:var(--space-3);" class="notice-box">
@@ -382,21 +382,20 @@
           </div>
           <div class="field-row">
             <span class="field-label">실행 엔진</span>
-            ${fv('PHP 8.3 내장 서버 × 최대 10개 (메인 2개 항상 실행, 서브 8개 자동 확장) + SQLite')}
+            ${fv('nginx + PHP-FPM 8.3 (pm.max_children=10) + MariaDB + Redis 7')}
           </div>
           <div class="field-row">
             <span class="field-label">PHP 서버</span>
             <div class="field-value">
-              메인 2개 (포트 8888, 8889) 항상 실행 &nbsp;|&nbsp;
-              서브 8개 (8890~8897) 부하 시 자동 활성화
+              nginx 리버스 프록시 + PHP-FPM 풀 (포트 9000 main · 9001 sub)
             </div>
           </div>
           <div class="field-row">
             <span class="field-label">Redis 캐시</span>
             <div class="field-value" style="display:flex;align-items:center;gap:8px;">
               ${cred.redis?.enabled
-                ? '<span style="color:#10b981;">● 로컬 Redis 7 활성 (Object Cache)</span>'
-                : '<span style="color:#94a3b8;">○ 미사용 (선택사항)</span>'}
+                ? '<span style="color:#10b981;">● Redis 7 활성 (로컬, 무료)</span>'
+                : '<span style="color:#94a3b8;">○ Redis 준비 중</span>'}
             </div>
           </div>
           <div class="field-row">
@@ -410,7 +409,7 @@
             </div>
           </div>
           <div class="notice-box" style="margin-top:var(--space-3);">
-            🔄 PHP 서버와 Cloudflare 터널은 절대 다운되지 않아요. GitHub Actions keepalive가 60초마다 상태를 점검하고 자동 복구합니다.
+            🔄 nginx · PHP-FPM · MariaDB · Redis 7 · 터널이 절대 다운되지 않아요. keepalive가 60초마다 전체 스택을 점검하고 자동 복구합니다.
           </div>
         </div>
 
