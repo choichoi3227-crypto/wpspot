@@ -5,11 +5,12 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
-# 구조:
-# - 5개 job이 각각 60초 offset으로 실행 → 매 60초마다 롤링 커버
-# - 각 job: PHP 서버(메인 2개) + cloudflared Named Tunnel 재연결
-# - 서버/터널 절대 다운 없음 보장
-# - 0.0.0.0 바인딩, curl/터널은 HOST_IP(실제 IP) 사용
+# 구조: nginx + PHP-FPM 8.3 + MariaDB + Redis 7 (진짜 Redis, 로컬)
+# - 5개 job × 60초 offset → 매 60초 롤링 커버
+# - job timeout 8분 > cron 주기 5분 → 항상 overlap 3분
+# - 모든 서비스 systemctl 자동복구
+# - 매 5분마다 mysqldump → git push (DB 영속화)
+# - 0.0.0.0 바인딩, curl/터널은 HOST_IP 사용
 
 jobs:
   keepalive-0:
@@ -18,193 +19,311 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: PHP 8.3 설치
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-
       - name: 설정 로드
-        id: cfg
         run: |
           CFG="deploy/tunnel-config.json"
           if [ -f "$CFG" ]; then
-            WP_PORT=$(python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))")
-            WP_PORT2=$(python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))")
-            PLA_PORT=$(python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8999))")
+            WP_PORT=$(python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))")
+            PMA_PORT=$(python3 -c "import json; print(json.load(open('$CFG')).get('pma_port',8081))")
             WP_DIR=$(python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))")
-            PLA_DIR=$(python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))")
+            PMA_DIR=$(python3 -c "import json; print(json.load(open('$CFG')).get('pma_dir','wordpress/wp-content/phpmyadmin'))")
           else
-            WP_PORT=8888; WP_PORT2=8889; PLA_PORT=8999
-            WP_DIR=wordpress
-            PLA_DIR=wordpress/wp-content/phpliteadmin
+            WP_PORT=8080; PMA_PORT=8081
+            WP_DIR=wordpress; PMA_DIR=wordpress/wp-content/phpmyadmin
           fi
           echo "WP_PORT=$WP_PORT"   >> $GITHUB_ENV
-          echo "WP_PORT2=$WP_PORT2" >> $GITHUB_ENV
-          echo "PLA_PORT=$PLA_PORT" >> $GITHUB_ENV
+          echo "PMA_PORT=$PMA_PORT" >> $GITHUB_ENV
           echo "WP_DIR=$WP_DIR"     >> $GITHUB_ENV
-          echo "PLA_DIR=$PLA_DIR"   >> $GITHUB_ENV
+          echo "PMA_DIR=$PMA_DIR"   >> $GITHUB_ENV
           echo "REPO_ROOT=$(pwd)"   >> $GITHUB_ENV
+          echo "HOST_IP=$(hostname -I | awk '{print $1}')" >> $GITHUB_ENV
 
-      - name: wp-router.php 생성
+      - name: 패키지 설치 (nginx, PHP-FPM, MariaDB, Redis)
         run: |
-          cat > /tmp/wp-router.php << 'ROUTEREOF'
-<?php
-$docroot = ($_SERVER['DOCUMENT_ROOT'] !== '' && $_SERVER['DOCUMENT_ROOT'] !== false)
-    ? $_SERVER['DOCUMENT_ROOT'] : getcwd();
-$uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
-$file = rtrim($docroot, '/') . '/' . ltrim($uri, '/');
-if ($uri !== '/' && file_exists($file) && !is_dir($file)) {
-    return false;
-}
-chdir($docroot);
-$header = $docroot . '/wp-blog-header.php';
-if (file_exists($header)) {
-    require $header;
-} else {
-    http_response_code(503);
-    echo 'WordPress not found in: ' . $docroot;
-}
-ROUTEREOF
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            nginx \
+            php8.3-fpm php8.3-mysql php8.3-gd php8.3-curl php8.3-xml \
+            php8.3-mbstring php8.3-zip php8.3-intl php8.3-redis \
+            php8.3-opcache php8.3-bcmath \
+            mariadb-server mariadb-client \
+            redis-server \
+            2>/dev/null
+          echo "✓ 패키지 설치 완료"
 
-      - name: PHP 서버 시작 (메인 2개 + PLA)
+      - name: MariaDB 복원 및 시작
+        env:
+          DB_PASS: ${{ secrets.DB_PASS }}
         run: |
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          mkdir -p /tmp/php-servers
-          ABS_WP_DIR="${REPO_ROOT}/${WP_DIR}"
-          ABS_PLA_DIR="${REPO_ROOT}/${PLA_DIR}"
+          sudo systemctl start mariadb
+          sleep 2
 
-          start_wp() {
-            local PORT=$1
-            [ ! -d "$ABS_WP_DIR" ] && echo "::warning::WP 디렉토리 없음: $ABS_WP_DIR" && return
-            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-              -t "${ABS_WP_DIR}" \
-              -d display_errors=0 -d log_errors=1 -d memory_limit=256M \
-              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-            echo $! > "/tmp/php-servers/php-${PORT}.pid"
-          }
+          # DB/사용자 생성 (없으면)
+          sudo mysql -u root << SQLEOF
+          CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+          CREATE USER IF NOT EXISTS 'wpuser'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+          GRANT ALL PRIVILEGES ON wordpress.* TO 'wpuser'@'127.0.0.1';
+          FLUSH PRIVILEGES;
+          SQLEOF
 
-          start_wp $WP_PORT
-          start_wp $WP_PORT2
-          [ -d "$ABS_PLA_DIR" ] && {
-            php -S "0.0.0.0:${PLA_PORT}" \
-              -t "${ABS_PLA_DIR}" \
-              -d display_errors=0 -d log_errors=1 \
-              >> /tmp/php-pla.log 2>&1 &
-            echo $! > /tmp/php-pla.pid
-          }
-          sleep 3
-
-          # 상태 확인
-          for PORT in $WP_PORT $WP_PORT2; do
-            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 8 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-            echo "[keepalive-0] WP 포트 ${PORT}: ${CODE}"
-            if [ "$CODE" = "000" ]; then
-              echo "::warning::포트 ${PORT} 응답 없음 — 재시작"
-              kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
-              sleep 1
-              start_wp $PORT
-              sleep 3
-              CODE2=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 8 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              echo "[keepalive-0] 재시작 후 포트 ${PORT}: ${CODE2}"
-            fi
-          done
-
-          # 부하 시 서브 서버 자동 활성화 (최대 3개 추가)
-          LOAD_INT=$(uptime | awk -F'load average:' '{print $2}' | awk '{printf "%d", $1}')
-          if [ "${LOAD_INT:-0}" -ge 2 ]; then
-            ACTIVE=0
-            for PORT in 8890 8891 8892 8893 8894 8895 8896 8897; do
-              [ $ACTIVE -ge 3 ] && break
-              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 3 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              if [ "$CODE" = "000" ]; then
-                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-                  -t "${ABS_WP_DIR}" -d display_errors=0 \
-                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"
-                ACTIVE=$((ACTIVE+1))
-                echo "[keepalive-0] 서브 서버 추가: 포트 ${PORT}"
-                sleep 1
-              fi
-            done
+          # DB 내용 확인 — 비어있으면 최신 덤프 복원
+          WP_ROWS=$(mysql -u wpuser -p"${DB_PASS}" -h 127.0.0.1 -e \
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress';" \
+            2>/dev/null | tail -1 || echo "0")
+          if [ "$WP_ROWS" = "0" ] && [ -f "${WP_DIR}/db-backup/latest.sql.gz" ]; then
+            echo "DB 복원 중..."
+            zcat "${WP_DIR}/db-backup/latest.sql.gz" | sudo mysql -u root wordpress
+            echo "✓ DB 복원 완료"
+          else
+            echo "✓ DB 존재 (테이블 수: ${WP_ROWS})"
           fi
+
+      - name: Redis 시작 (로컬 Redis 7)
+        env:
+          REDIS_PASS: ${{ secrets.REDIS_PASS }}
+        run: |
+          sudo tee /etc/redis/redis.conf > /dev/null << REDISEOF
+          bind 127.0.0.1
+          port 6379
+          daemonize yes
+          logfile /var/log/redis/redis-server.log
+          requirepass ${REDIS_PASS}
+          maxmemory 128mb
+          maxmemory-policy allkeys-lru
+          save ""
+          appendonly no
+          tcp-keepalive 300
+          REDISEOF
+          sudo systemctl restart redis-server
+          sleep 1
+          redis-cli -a "${REDIS_PASS}" ping 2>/dev/null | grep -q PONG \
+            && echo "✓ Redis 7 기동 완료" || echo "::warning::Redis ping 실패"
+
+      - name: PHP-FPM 설정 및 시작
+        run: |
+          # OPcache
+          sudo tee /etc/php/8.3/fpm/conf.d/10-opcache-wp.ini > /dev/null << 'INIEOF'
+          opcache.enable=1
+          opcache.memory_consumption=128
+          opcache.interned_strings_buffer=16
+          opcache.max_accelerated_files=10000
+          opcache.revalidate_freq=0
+          opcache.validate_timestamps=0
+          opcache.fast_shutdown=1
+          INIEOF
+
+          sudo tee /etc/php/8.3/fpm/conf.d/20-wp-tune.ini > /dev/null << 'INIEOF'
+          upload_max_filesize=64M
+          post_max_size=64M
+          memory_limit=256M
+          max_execution_time=300
+          display_errors=Off
+          log_errors=On
+          INIEOF
+
+          # 메인 풀 (9000)
+          sudo tee /etc/php/8.3/fpm/pool.d/www.conf > /dev/null << 'POOLEOF'
+          [www]
+          user = www-data
+          group = www-data
+          listen = 127.0.0.1:9000
+          pm = dynamic
+          pm.max_children = 10
+          pm.start_servers = 2
+          pm.min_spare_servers = 2
+          pm.max_spare_servers = 5
+          pm.max_requests = 500
+          POOLEOF
+
+          # 서브 풀 (9001, ondemand)
+          sudo tee /etc/php/8.3/fpm/pool.d/www2.conf > /dev/null << 'POOLEOF'
+          [www2]
+          user = www-data
+          group = www-data
+          listen = 127.0.0.1:9001
+          pm = ondemand
+          pm.max_children = 10
+          pm.process_idle_timeout = 30s
+          pm.max_requests = 500
+          POOLEOF
+
+          sudo systemctl restart php8.3-fpm
+          sleep 1
+          sudo systemctl is-active php8.3-fpm && echo "✓ PHP-FPM 기동" || echo "::warning::PHP-FPM 실패"
+
+      - name: nginx 설정 및 시작
+        env:
+          DB_PASS: ${{ secrets.DB_PASS }}
+        run: |
+          WP_ABS="${REPO_ROOT}/${WP_DIR}"
+          PMA_ABS="${REPO_ROOT}/${PMA_DIR}"
+
+          # wp-config.php 비밀번호 업데이트 (runner마다 새 MariaDB)
+          if [ -f "${WP_ABS}/wp-config.php" ]; then
+            sudo sed -i "s/define('DB_PASSWORD', '[^']*')/define('DB_PASSWORD', '${DB_PASS}')/" \
+              "${WP_ABS}/wp-config.php"
+            sudo sed -i "s/define('WP_REDIS_PASSWORD', '[^']*')/define('WP_REDIS_PASSWORD', '$(cat /dev/stdin << EOPASS
+${{ secrets.REDIS_PASS }}
+EOPASS
+)')/" "${WP_ABS}/wp-config.php" 2>/dev/null || true
+          fi
+
+          # upstream
+          sudo tee /etc/nginx/conf.d/upstream-phpfpm.conf > /dev/null << NGXEOF
+          upstream php_fpm_pool {
+              least_conn;
+              server 127.0.0.1:9000 weight=5;
+              server 127.0.0.1:9001 weight=3 backup;
+              keepalive 16;
+          }
+          NGXEOF
+
+          # WordPress
+          sudo tee /etc/nginx/sites-available/wordpress > /dev/null << NGXEOF
+          server {
+              listen ${WP_PORT};
+              server_name _;
+              root ${WP_ABS};
+              index index.php index.html;
+              client_max_body_size 64M;
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
+              gzip_comp_level 5;
+              gzip_min_length 256;
+              location ~* \.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|ttf|svg|webp|avif)$ {
+                  expires 1y;
+                  add_header Cache-Control "public, immutable";
+                  try_files \$uri =404;
+              }
+              location / { try_files \$uri \$uri/ /index.php?\$args; }
+              location ~ \.php$ {
+                  fastcgi_pass php_fpm_pool;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  fastcgi_param HTTPS on;
+                  fastcgi_param SERVER_PORT 443;
+                  include fastcgi_params;
+                  fastcgi_read_timeout 300;
+                  fastcgi_buffers 16 16k;
+                  fastcgi_buffer_size 32k;
+              }
+              location = /xmlrpc.php { deny all; }
+              location ~* /\. { deny all; }
+              location ~* /uploads/.*\.php$ { deny all; }
+          }
+          NGXEOF
+
+          # phpMyAdmin
+          sudo tee /etc/nginx/sites-available/phpmyadmin > /dev/null << NGXEOF
+          server {
+              listen ${PMA_PORT};
+              server_name _;
+              root ${PMA_ABS};
+              index index.php;
+              client_max_body_size 64M;
+              location / { try_files \$uri \$uri/ /index.php?\$args; }
+              location ~ \.php$ {
+                  fastcgi_pass 127.0.0.1:9000;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  fastcgi_param HTTPS on;
+                  include fastcgi_params;
+              }
+          }
+          NGXEOF
+
+          sudo ln -sf /etc/nginx/sites-available/wordpress  /etc/nginx/sites-enabled/
+          sudo ln -sf /etc/nginx/sites-available/phpmyadmin /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo chown -R www-data:www-data "${WP_ABS}/" 2>/dev/null || true
+          sudo nginx -t 2>&1 | tail -2
+          sudo systemctl restart nginx
+          sleep 1
+
+          for PORT in ${WP_PORT} ${PMA_PORT}; do
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
+                     "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+            echo "[keepalive-0] nginx 포트 ${PORT}: ${CODE}"
+          done
 
       - name: cloudflared 설치
         run: |
-          curl -sSL \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" \
-            -o /tmp/cf.deb
+          CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+          for attempt in 1 2 3; do
+            curl -sSL -f "$CF_URL" -o /tmp/cf.deb && break
+            echo "::warning::cloudflared 다운로드 실패 (시도 ${attempt}/3)"
+            sleep 5
+            [ $attempt -eq 3 ] && { echo "::warning::cloudflared 설치 실패"; exit 0; }
+          done
           dpkg -x /tmp/cf.deb /tmp/cf-pkg
           sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-      - name: Named Tunnel 재연결 (WP + PLA)
+      - name: Named Tunnel 연결
         env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-          PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
+          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
+          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
         run: |
-          HOST_IP=$(hostname -I | awk '{print $1}')
-
-          connect_tunnel() {
-            local TOKEN=$1 PORT=$2 PIDFILE=$3 LOG=$4 LABEL=$5
-            [ -z "$TOKEN" ] && { echo "::warning::${LABEL} 토큰 없음"; return; }
+          connect() {
+            local TOKEN="$1" PORT="$2" PID="$3" LOG="$4" LABEL="$5"
+            [ -z "$TOKEN" ] && return
             cloudflared tunnel --no-autoupdate run \
-              --token "$TOKEN" \
-              --url "http://${HOST_IP}:${PORT}" \
+              --token "$TOKEN" --url "http://${HOST_IP}:${PORT}" \
               --logfile "$LOG" 2>&1 &
-            echo $! > "$PIDFILE"
+            echo $! > "$PID"
             sleep 4
             CONN=$(grep -c "Registered tunnel connection" "$LOG" 2>/dev/null || echo "0")
             echo "[keepalive-0] ${LABEL} 터널: $CONN"
             if [ "$CONN" = "0" ]; then
-              echo "::warning::${LABEL} 터널 실패 — 재시도"
-              kill "$(cat $PIDFILE 2>/dev/null)" 2>/dev/null || true
-              sleep 3
+              kill "$(cat $PID 2>/dev/null)" 2>/dev/null || true; sleep 3
               cloudflared tunnel --no-autoupdate run \
                 --token "$TOKEN" --url "http://${HOST_IP}:${PORT}" \
                 --logfile "$LOG" 2>&1 &
-              echo $! > "$PIDFILE"
+              echo $! > "$PID"
               sleep 4
             fi
           }
+          connect "$WP_TUNNEL_TOKEN"  "$WP_PORT"  /tmp/cf-wp.pid  /tmp/cf-wp.log  "WP"
+          connect "$PMA_TUNNEL_TOKEN" "$PMA_PORT" /tmp/cf-pma.pid /tmp/cf-pma.log "PMA"
 
-          connect_tunnel "$WP_TUNNEL_TOKEN"  $WP_PORT  /tmp/cf-wp.pid  /tmp/cf-wp.log  "WP"
-          connect_tunnel "$PLA_TUNNEL_TOKEN" $PLA_PORT /tmp/cf-pla.pid /tmp/cf-pla.log "PLA"
-
-      - name: 서버 유지 (270초 자동복구)
+      - name: DB 백업 + git push (영속화)
         env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
+          DB_PASS: ${{ secrets.DB_PASS }}
         run: |
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          ABS_WP_DIR="${REPO_ROOT}/${WP_DIR}"
+          mkdir -p "${WP_DIR}/db-backup"
+          mysqldump -u wpuser -p"${DB_PASS}" -h 127.0.0.1 wordpress \
+            2>/dev/null | gzip > "${WP_DIR}/db-backup/latest.sql.gz" || true
+          git config user.name  "wpspot-bot"
+          git config user.email "bot@wpspot.app"
+          git add "${WP_DIR}/db-backup/latest.sql.gz" 2>/dev/null || true
+          git diff --cached --quiet || \
+            git commit -m "chore: db backup [keepalive-0]" && git push || true
 
-          check() {
-            for PORT in $WP_PORT $WP_PORT2; do
-              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              if [ "$CODE" = "000" ]; then
-                echo "[복구] 포트 ${PORT} 재시작"
-                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true
-                sleep 1
-                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-                  -t "${ABS_WP_DIR}" -d display_errors=0 \
-                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              else
-                echo "[OK] 포트 ${PORT}: ${CODE}"
-              fi
-            done
-            if ! kill -0 "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null && [ -n "$WP_TUNNEL_TOKEN" ]; then
-              echo "[복구] WP 터널 재시작"
-              cloudflared tunnel --no-autoupdate run \
+      - name: 서버 유지 (270초)
+        env:
+          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
+          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
+          DB_PASS:          ${{ secrets.DB_PASS }}
+          REDIS_PASS:       ${{ secrets.REDIS_PASS }}
+        run: |
+          recover_all() {
+            sudo systemctl is-active nginx       > /dev/null 2>&1 || sudo systemctl restart nginx
+            sudo systemctl is-active php8.3-fpm  > /dev/null 2>&1 || sudo systemctl restart php8.3-fpm
+            sudo systemctl is-active mariadb      > /dev/null 2>&1 || sudo systemctl restart mariadb
+            sudo systemctl is-active redis-server > /dev/null 2>&1 || sudo systemctl restart redis-server
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 \
+                     "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000")
+            echo "[상태] nginx: ${CODE}"
+            kill -0 "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || {
+              [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
                 --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-                --logfile /tmp/cf-wp.log 2>&1 &
-              echo $! > /tmp/cf-wp.pid
-            fi
+                --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
+            }
           }
-
-          sleep 90;  check; echo "[90s] keepalive-0"
-          sleep 90;  check; echo "[180s] keepalive-0"
+          sleep 90;  recover_all; echo "[90s] keepalive-0 유지"
+          sleep 90;  recover_all; echo "[180s] keepalive-0 유지"
           sleep 90;  echo "keepalive-0 완료"
 
+  # ── keepalive-1 ~ 4: 60s offset, 동일 로직 ──────────────────
   keepalive-1:
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -212,82 +331,222 @@ ROUTEREOF
       - name: Offset 60s
         run: sleep 60
       - uses: actions/checkout@v4
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-      - name: 서버+터널 유지
+      - name: 전체 스택 기동
         env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-          PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
+          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
+          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
+          DB_PASS:          ${{ secrets.DB_PASS }}
+          REDIS_PASS:       ${{ secrets.REDIS_PASS }}
         run: |
           CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          WP_PORT2=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))" || echo 8889)
-          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8999))" || echo 8999)
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          PMA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_port',8081))" || echo 8081)
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
-          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+          PMA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_dir','wordpress/wp-content/phpmyadmin'))" || echo "wordpress/wp-content/phpmyadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
-          ABS_WP_DIR="$(pwd)/${WP_DIR}"
-          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
-          mkdir -p /tmp/php-servers
+          WP_ABS="$(pwd)/${WP_DIR}"
+          PMA_ABS="$(pwd)/${PMA_DIR}"
 
-          cat > /tmp/wp-router.php << 'ROUTEREOF'
-<?php
-$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
-$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-$f=rtrim($d,'/').'/'.ltrim($uri,'/');
-if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-chdir($d);$h=$d.'/wp-blog-header.php';
-if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
-ROUTEREOF
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            nginx php8.3-fpm php8.3-mysql php8.3-gd php8.3-curl php8.3-xml \
+            php8.3-mbstring php8.3-zip php8.3-intl php8.3-redis php8.3-opcache \
+            mariadb-server mariadb-client redis-server 2>/dev/null
 
-          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
-            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
-              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-            echo $! > "/tmp/php-servers/php-${PORT}.pid"
-          done
-          [ -d "$ABS_PLA_DIR" ] && {
-            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
-              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
+          sudo systemctl start mariadb; sleep 2
+          sudo mysql -u root << SQLEOF
+          CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+          CREATE USER IF NOT EXISTS 'wpuser'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+          GRANT ALL PRIVILEGES ON wordpress.* TO 'wpuser'@'127.0.0.1';
+          FLUSH PRIVILEGES;
+          SQLEOF
+          WP_ROWS=$(mysql -u wpuser -p"${DB_PASS}" -h 127.0.0.1 -e \
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress';" \
+            2>/dev/null | tail -1 || echo "0")
+          [ "$WP_ROWS" = "0" ] && [ -f "${WP_DIR}/db-backup/latest.sql.gz" ] && \
+            zcat "${WP_DIR}/db-backup/latest.sql.gz" | sudo mysql -u root wordpress
+
+          sudo tee /etc/redis/redis.conf > /dev/null << REDISEOF
+          bind 127.0.0.1
+          port 6379
+          daemonize yes
+          logfile /var/log/redis/redis-server.log
+          requirepass ${REDIS_PASS}
+          maxmemory 128mb
+          maxmemory-policy allkeys-lru
+          save ""
+          appendonly no
+          REDISEOF
+          sudo systemctl restart redis-server; sleep 1
+
+          sudo tee /etc/php/8.3/fpm/conf.d/10-opcache-wp.ini > /dev/null << 'INIEOF'
+          opcache.enable=1
+          opcache.memory_consumption=128
+          opcache.interned_strings_buffer=16
+          opcache.max_accelerated_files=10000
+          opcache.revalidate_freq=0
+          opcache.validate_timestamps=0
+          opcache.fast_shutdown=1
+          INIEOF
+          sudo tee /etc/php/8.3/fpm/conf.d/20-wp-tune.ini > /dev/null << 'INIEOF'
+          upload_max_filesize=64M
+          post_max_size=64M
+          memory_limit=256M
+          max_execution_time=300
+          display_errors=Off
+          INIEOF
+          sudo tee /etc/php/8.3/fpm/pool.d/www.conf > /dev/null << 'POOLEOF'
+          [www]
+          user = www-data
+          group = www-data
+          listen = 127.0.0.1:9000
+          pm = dynamic
+          pm.max_children = 10
+          pm.start_servers = 2
+          pm.min_spare_servers = 2
+          pm.max_spare_servers = 5
+          pm.max_requests = 500
+          POOLEOF
+          sudo tee /etc/php/8.3/fpm/pool.d/www2.conf > /dev/null << 'POOLEOF'
+          [www2]
+          user = www-data
+          group = www-data
+          listen = 127.0.0.1:9001
+          pm = ondemand
+          pm.max_children = 10
+          pm.process_idle_timeout = 30s
+          pm.max_requests = 500
+          POOLEOF
+          sudo systemctl restart php8.3-fpm; sleep 1
+
+          # wp-config 비밀번호 패치
+          [ -f "${WP_ABS}/wp-config.php" ] && \
+            sudo sed -i "s/define('DB_PASSWORD', '[^']*')/define('DB_PASSWORD', '${DB_PASS}')/" \
+              "${WP_ABS}/wp-config.php"
+
+          sudo tee /etc/nginx/conf.d/upstream-phpfpm.conf > /dev/null << NGXEOF
+          upstream php_fpm_pool {
+              least_conn;
+              server 127.0.0.1:9000 weight=5;
+              server 127.0.0.1:9001 weight=3 backup;
+              keepalive 16;
           }
-          sleep 3
+          NGXEOF
+          sudo tee /etc/nginx/sites-available/wordpress > /dev/null << NGXEOF
+          server {
+              listen ${WP_PORT};
+              server_name _;
+              root ${WP_ABS};
+              index index.php index.html;
+              client_max_body_size 64M;
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
+              gzip_comp_level 5;
+              gzip_min_length 256;
+              location ~* \.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|ttf|svg|webp|avif)$ {
+                  expires 1y;
+                  add_header Cache-Control "public, immutable";
+                  try_files \$uri =404;
+              }
+              location / { try_files \$uri \$uri/ /index.php?\$args; }
+              location ~ \.php$ {
+                  fastcgi_pass php_fpm_pool;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  fastcgi_param HTTPS on;
+                  fastcgi_param SERVER_PORT 443;
+                  include fastcgi_params;
+                  fastcgi_read_timeout 300;
+                  fastcgi_buffers 16 16k;
+                  fastcgi_buffer_size 32k;
+              }
+              location = /xmlrpc.php { deny all; }
+              location ~* /\. { deny all; }
+              location ~* /uploads/.*\.php$ { deny all; }
+          }
+          NGXEOF
+          sudo tee /etc/nginx/sites-available/phpmyadmin > /dev/null << NGXEOF
+          server {
+              listen ${PMA_PORT};
+              server_name _;
+              root ${PMA_ABS};
+              index index.php;
+              client_max_body_size 64M;
+              location / { try_files \$uri \$uri/ /index.php?\$args; }
+              location ~ \.php$ {
+                  fastcgi_pass 127.0.0.1:9000;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  fastcgi_param HTTPS on;
+                  include fastcgi_params;
+              }
+          }
+          NGXEOF
+          sudo ln -sf /etc/nginx/sites-available/wordpress  /etc/nginx/sites-enabled/
+          sudo ln -sf /etc/nginx/sites-available/phpmyadmin /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo chown -R www-data:www-data "${WP_ABS}/" 2>/dev/null || true
+          sudo nginx -t 2>&1 | tail -1
+          sudo systemctl restart nginx; sleep 1
 
-          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          for PORT in ${WP_PORT} ${PMA_PORT}; do
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
+                     "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
+            echo "[keepalive-1] 포트 ${PORT}: ${CODE}"
+          done
+
+          # cloudflared
+          CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+          for _t in 1 2 3; do curl -sSL -f "$CF_URL" -o /tmp/cf.deb && break; sleep 5; done
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
 
-          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-            --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
-          [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
-            --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 4
-
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "[keepalive-1] WP 터널: $CONN"
-          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
-            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
+          connect() {
+            local TOKEN="$1" PORT="$2" PID="$3" LOG="$4"
+            [ -z "$TOKEN" ] && return
             cloudflared tunnel --no-autoupdate run \
-              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
-          fi
-
-          check_ports() {
-            for PORT in $WP_PORT $WP_PORT2; do
-              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              [ "$CODE" = "000" ] && {
-                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
-                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-                  -t "${ABS_WP_DIR}" -d display_errors=0 \
-                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              } || echo "[OK] 포트 ${PORT}: ${CODE}"
-            done
+              --token "$TOKEN" --url "http://${HOST_IP}:${PORT}" --logfile "$LOG" 2>&1 &
+            echo $! > "$PID"; sleep 4
+            CONN=$(grep -c "Registered tunnel connection" "$LOG" 2>/dev/null || echo "0")
+            echo "[keepalive-1] 터널 포트 ${PORT}: $CONN"
+            [ "$CONN" = "0" ] && { kill "$(cat $PID 2>/dev/null)" 2>/dev/null || true; sleep 3
+              cloudflared tunnel --no-autoupdate run \
+                --token "$TOKEN" --url "http://${HOST_IP}:${PORT}" --logfile "$LOG" 2>&1 &
+              echo $! > "$PID"; sleep 4; }
           }
-          sleep 90; check_ports; echo "[90s] keepalive-1"
-          sleep 90; check_ports; echo "[180s] keepalive-1"
+          connect "$WP_TUNNEL_TOKEN"  "$WP_PORT"  /tmp/cf-wp.pid  /tmp/cf-wp.log
+          connect "$PMA_TUNNEL_TOKEN" "$PMA_PORT" /tmp/cf-pma.pid /tmp/cf-pma.log
+
+      - name: 서버 유지 + DB 백업
+        env:
+          DB_PASS: ${{ secrets.DB_PASS }}
+          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
+        run: |
+          CFG="deploy/tunnel-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
+          HOST_IP=$(hostname -I | awk '{print $1}')
+
+          recover_all() {
+            sudo systemctl is-active nginx       > /dev/null 2>&1 || sudo systemctl restart nginx
+            sudo systemctl is-active php8.3-fpm  > /dev/null 2>&1 || sudo systemctl restart php8.3-fpm
+            sudo systemctl is-active mariadb      > /dev/null 2>&1 || sudo systemctl restart mariadb
+            sudo systemctl is-active redis-server > /dev/null 2>&1 || sudo systemctl restart redis-server
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 \
+                     "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000")
+            echo "[상태] ${CODE}"
+          }
+
+          sleep 90; recover_all
+          # DB 백업
+          mkdir -p "${WP_DIR}/db-backup"
+          mysqldump -u wpuser -p"${DB_PASS}" -h 127.0.0.1 wordpress 2>/dev/null \
+            | gzip > "${WP_DIR}/db-backup/latest.sql.gz" || true
+          git config user.name "wpspot-bot"; git config user.email "bot@wpspot.app"
+          git add "${WP_DIR}/db-backup/" 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: db backup [keepalive-1]" && git push || true
+          echo "[90s] keepalive-1"
+
+          sleep 90; recover_all; echo "[180s] keepalive-1"
           sleep 90; echo "keepalive-1 완료"
 
   keepalive-2:
@@ -297,83 +556,64 @@ ROUTEREOF
       - name: Offset 120s
         run: sleep 120
       - uses: actions/checkout@v4
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-      - name: 서버+터널 유지
+      - name: 전체 스택 기동
         env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-          PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
+          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
+          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
+          DB_PASS:          ${{ secrets.DB_PASS }}
+          REDIS_PASS:       ${{ secrets.REDIS_PASS }}
         run: |
           CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          WP_PORT2=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))" || echo 8889)
-          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8999))" || echo 8999)
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          PMA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_port',8081))" || echo 8081)
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
-          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+          PMA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_dir','wordpress/wp-content/phpmyadmin'))" || echo "wordpress/wp-content/phpmyadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
-          ABS_WP_DIR="$(pwd)/${WP_DIR}"
-          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
-          mkdir -p /tmp/php-servers
-
-          cat > /tmp/wp-router.php << 'ROUTEREOF'
-<?php
-$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
-$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-$f=rtrim($d,'/').'/'.ltrim($uri,'/');
-if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-chdir($d);$h=$d.'/wp-blog-header.php';
-if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
-ROUTEREOF
-
-          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
-            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
-              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-            echo $! > "/tmp/php-servers/php-${PORT}.pid"
-          done
-          [ -d "$ABS_PLA_DIR" ] && {
-            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
-              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
-          }
-          sleep 3
-
-          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          WP_ABS="$(pwd)/${WP_DIR}"; PMA_ABS="$(pwd)/${PMA_DIR}"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx php8.3-fpm php8.3-mysql php8.3-gd php8.3-curl php8.3-xml php8.3-mbstring php8.3-zip php8.3-intl php8.3-redis php8.3-opcache mariadb-server mariadb-client redis-server 2>/dev/null
+          sudo systemctl start mariadb; sleep 2
+          sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4; CREATE USER IF NOT EXISTS 'wpuser'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}'; GRANT ALL ON wordpress.* TO 'wpuser'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null
+          WP_ROWS=$(mysql -u wpuser -p"${DB_PASS}" -h 127.0.0.1 -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress';" 2>/dev/null | tail -1 || echo "0")
+          [ "$WP_ROWS" = "0" ] && [ -f "${WP_DIR}/db-backup/latest.sql.gz" ] && zcat "${WP_DIR}/db-backup/latest.sql.gz" | sudo mysql -u root wordpress
+          printf "bind 127.0.0.1\nport 6379\ndaemonize yes\nrequirepass ${REDIS_PASS}\nmaxmemory 128mb\nmaxmemory-policy allkeys-lru\nsave \"\"\n" | sudo tee /etc/redis/redis.conf > /dev/null
+          sudo systemctl restart redis-server; sleep 1
+          printf "opcache.enable=1\nopcache.memory_consumption=128\nopcache.max_accelerated_files=10000\nopcache.revalidate_freq=0\nopcache.validate_timestamps=0\n" | sudo tee /etc/php/8.3/fpm/conf.d/10-opcache-wp.ini > /dev/null
+          printf "[www]\nuser=www-data\ngroup=www-data\nlisten=127.0.0.1:9000\npm=dynamic\npm.max_children=10\npm.start_servers=2\npm.min_spare_servers=2\npm.max_spare_servers=5\npm.max_requests=500\n" | sudo tee /etc/php/8.3/fpm/pool.d/www.conf > /dev/null
+          printf "[www2]\nuser=www-data\ngroup=www-data\nlisten=127.0.0.1:9001\npm=ondemand\npm.max_children=10\npm.process_idle_timeout=30s\n" | sudo tee /etc/php/8.3/fpm/pool.d/www2.conf > /dev/null
+          sudo systemctl restart php8.3-fpm; sleep 1
+          [ -f "${WP_ABS}/wp-config.php" ] && sudo sed -i "s/define('DB_PASSWORD', '[^']*')/define('DB_PASSWORD', '${DB_PASS}')/" "${WP_ABS}/wp-config.php"
+          printf "upstream php_fpm_pool { least_conn; server 127.0.0.1:9000 weight=5; server 127.0.0.1:9001 weight=3 backup; keepalive 16; }\n" | sudo tee /etc/nginx/conf.d/upstream-phpfpm.conf > /dev/null
+          sudo tee /etc/nginx/sites-available/wordpress > /dev/null << NGXEOF
+          server { listen ${WP_PORT}; server_name _; root ${WP_ABS}; index index.php; client_max_body_size 64M; gzip on; gzip_types text/plain text/css application/json application/javascript; location ~* \.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg|webp)$ { expires 1y; add_header Cache-Control "public, immutable"; try_files \$uri =404; } location / { try_files \$uri \$uri/ /index.php?\$args; } location ~ \.php$ { fastcgi_pass php_fpm_pool; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_param HTTPS on; fastcgi_param SERVER_PORT 443; include fastcgi_params; fastcgi_buffers 16 16k; fastcgi_buffer_size 32k; } location = /xmlrpc.php { deny all; } location ~* /\. { deny all; } location ~* /uploads/.*\.php$ { deny all; } }
+          NGXEOF
+          sudo tee /etc/nginx/sites-available/phpmyadmin > /dev/null << NGXEOF
+          server { listen ${PMA_PORT}; server_name _; root ${PMA_ABS}; index index.php; location / { try_files \$uri \$uri/ /index.php?\$args; } location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_param HTTPS on; include fastcgi_params; } }
+          NGXEOF
+          sudo ln -sf /etc/nginx/sites-available/wordpress /etc/nginx/sites-enabled/
+          sudo ln -sf /etc/nginx/sites-available/phpmyadmin /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo chown -R www-data:www-data "${WP_ABS}/" 2>/dev/null || true
+          sudo nginx -t 2>&1 | tail -1 && sudo systemctl restart nginx; sleep 1
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000")
+          echo "[keepalive-2] WP: ${CODE}"
+          CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+          for _t in 1 2 3; do curl -sSL -f "$CF_URL" -o /tmp/cf.deb && break; sleep 5; done
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
-
-          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-            --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
-          [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
-            --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 4
-
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "[keepalive-2] WP 터널: $CONN"
-          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
-            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
-            cloudflared tunnel --no-autoupdate run \
-              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
-          fi
-
-          check_ports() {
-            for PORT in $WP_PORT $WP_PORT2; do
-              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              [ "$CODE" = "000" ] && {
-                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
-                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-                  -t "${ABS_WP_DIR}" -d display_errors=0 \
-                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              } || echo "[OK] 포트 ${PORT}: ${CODE}"
-            done
-          }
-          sleep 90; check_ports; echo "[90s] keepalive-2"
-          sleep 90; check_ports; echo "[180s] keepalive-2"
-          sleep 90; echo "keepalive-2 완료"
+          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
+          [ -n "$PMA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run --token "$PMA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PMA_PORT}" --logfile /tmp/cf-pma.log 2>&1 & echo $! > /tmp/cf-pma.pid
+          sleep 4; CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0"); echo "[keepalive-2] 터널: $CONN"
+      - name: 유지
+        run: |
+          CFG="deploy/tunnel-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          HOST_IP=$(hostname -I | awk '{print $1}')
+          for tick in 90 90 90; do
+            sleep $tick
+            sudo systemctl is-active nginx > /dev/null 2>&1 || sudo systemctl restart nginx
+            sudo systemctl is-active mariadb > /dev/null 2>&1 || sudo systemctl restart mariadb
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[keepalive-2] ${CODE}"
+          done
 
   keepalive-3:
     runs-on: ubuntu-latest
@@ -382,83 +622,61 @@ ROUTEREOF
       - name: Offset 180s
         run: sleep 180
       - uses: actions/checkout@v4
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-      - name: 서버+터널 유지
+      - name: 전체 스택 기동
         env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-          PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
+          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
+          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
+          DB_PASS:          ${{ secrets.DB_PASS }}
+          REDIS_PASS:       ${{ secrets.REDIS_PASS }}
         run: |
           CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          WP_PORT2=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))" || echo 8889)
-          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8999))" || echo 8999)
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          PMA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_port',8081))" || echo 8081)
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
-          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+          PMA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_dir','wordpress/wp-content/phpmyadmin'))" || echo "wordpress/wp-content/phpmyadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
-          ABS_WP_DIR="$(pwd)/${WP_DIR}"
-          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
-          mkdir -p /tmp/php-servers
-
-          cat > /tmp/wp-router.php << 'ROUTEREOF'
-<?php
-$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
-$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-$f=rtrim($d,'/').'/'.ltrim($uri,'/');
-if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-chdir($d);$h=$d.'/wp-blog-header.php';
-if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
-ROUTEREOF
-
-          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
-            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
-              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-            echo $! > "/tmp/php-servers/php-${PORT}.pid"
-          done
-          [ -d "$ABS_PLA_DIR" ] && {
-            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
-              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
-          }
-          sleep 3
-
-          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          WP_ABS="$(pwd)/${WP_DIR}"; PMA_ABS="$(pwd)/${PMA_DIR}"
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends nginx php8.3-fpm php8.3-mysql php8.3-gd php8.3-curl php8.3-xml php8.3-mbstring php8.3-zip php8.3-intl php8.3-redis php8.3-opcache mariadb-server mariadb-client redis-server 2>/dev/null
+          sudo systemctl start mariadb; sleep 2
+          sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4; CREATE USER IF NOT EXISTS 'wpuser'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}'; GRANT ALL ON wordpress.* TO 'wpuser'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null
+          WP_ROWS=$(mysql -u wpuser -p"${DB_PASS}" -h 127.0.0.1 -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress';" 2>/dev/null | tail -1 || echo "0")
+          [ "$WP_ROWS" = "0" ] && [ -f "${WP_DIR}/db-backup/latest.sql.gz" ] && zcat "${WP_DIR}/db-backup/latest.sql.gz" | sudo mysql -u root wordpress
+          printf "bind 127.0.0.1\nport 6379\ndaemonize yes\nrequirepass ${REDIS_PASS}\nmaxmemory 128mb\nmaxmemory-policy allkeys-lru\nsave \"\"\n" | sudo tee /etc/redis/redis.conf > /dev/null && sudo systemctl restart redis-server; sleep 1
+          printf "opcache.enable=1\nopcache.memory_consumption=128\nopcache.max_accelerated_files=10000\nopcache.revalidate_freq=0\nopcache.validate_timestamps=0\n" | sudo tee /etc/php/8.3/fpm/conf.d/10-opcache-wp.ini > /dev/null
+          printf "[www]\nuser=www-data\ngroup=www-data\nlisten=127.0.0.1:9000\npm=dynamic\npm.max_children=10\npm.start_servers=2\npm.min_spare_servers=2\npm.max_spare_servers=5\npm.max_requests=500\n" | sudo tee /etc/php/8.3/fpm/pool.d/www.conf > /dev/null
+          printf "[www2]\nuser=www-data\ngroup=www-data\nlisten=127.0.0.1:9001\npm=ondemand\npm.max_children=10\npm.process_idle_timeout=30s\n" | sudo tee /etc/php/8.3/fpm/pool.d/www2.conf > /dev/null
+          sudo systemctl restart php8.3-fpm; sleep 1
+          [ -f "${WP_ABS}/wp-config.php" ] && sudo sed -i "s/define('DB_PASSWORD', '[^']*')/define('DB_PASSWORD', '${DB_PASS}')/" "${WP_ABS}/wp-config.php"
+          printf "upstream php_fpm_pool { least_conn; server 127.0.0.1:9000 weight=5; server 127.0.0.1:9001 weight=3 backup; keepalive 16; }\n" | sudo tee /etc/nginx/conf.d/upstream-phpfpm.conf > /dev/null
+          sudo tee /etc/nginx/sites-available/wordpress > /dev/null << NGXEOF
+          server { listen ${WP_PORT}; server_name _; root ${WP_ABS}; index index.php; client_max_body_size 64M; gzip on; gzip_types text/plain text/css application/json application/javascript; location ~* \.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg|webp)$ { expires 1y; add_header Cache-Control "public, immutable"; try_files \$uri =404; } location / { try_files \$uri \$uri/ /index.php?\$args; } location ~ \.php$ { fastcgi_pass php_fpm_pool; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_param HTTPS on; fastcgi_param SERVER_PORT 443; include fastcgi_params; fastcgi_buffers 16 16k; fastcgi_buffer_size 32k; } location = /xmlrpc.php { deny all; } location ~* /\. { deny all; } }
+          NGXEOF
+          sudo tee /etc/nginx/sites-available/phpmyadmin > /dev/null << NGXEOF
+          server { listen ${PMA_PORT}; server_name _; root ${PMA_ABS}; index index.php; location / { try_files \$uri \$uri/ /index.php?\$args; } location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_param HTTPS on; include fastcgi_params; } }
+          NGXEOF
+          sudo ln -sf /etc/nginx/sites-available/wordpress /etc/nginx/sites-enabled/
+          sudo ln -sf /etc/nginx/sites-available/phpmyadmin /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo chown -R www-data:www-data "${WP_ABS}/" 2>/dev/null || true
+          sudo nginx -t 2>&1 | tail -1 && sudo systemctl restart nginx; sleep 1
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[keepalive-3] WP: ${CODE}"
+          CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+          for _t in 1 2 3; do curl -sSL -f "$CF_URL" -o /tmp/cf.deb && break; sleep 5; done
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
-
-          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-            --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
-          [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
-            --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 4
-
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "[keepalive-3] WP 터널: $CONN"
-          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
-            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
-            cloudflared tunnel --no-autoupdate run \
-              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
-          fi
-
-          check_ports() {
-            for PORT in $WP_PORT $WP_PORT2; do
-              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              [ "$CODE" = "000" ] && {
-                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
-                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-                  -t "${ABS_WP_DIR}" -d display_errors=0 \
-                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              } || echo "[OK] 포트 ${PORT}: ${CODE}"
-            done
-          }
-          sleep 90; check_ports; echo "[90s] keepalive-3"
-          sleep 90; check_ports; echo "[180s] keepalive-3"
-          sleep 90; echo "keepalive-3 완료"
+          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
+          [ -n "$PMA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run --token "$PMA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PMA_PORT}" --logfile /tmp/cf-pma.log 2>&1 & echo $! > /tmp/cf-pma.pid
+          sleep 4; CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0"); echo "[keepalive-3] 터널: $CONN"
+      - name: 유지
+        run: |
+          CFG="deploy/tunnel-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          HOST_IP=$(hostname -I | awk '{print $1}')
+          for tick in 90 90 90; do
+            sleep $tick
+            sudo systemctl is-active nginx > /dev/null 2>&1 || sudo systemctl restart nginx
+            sudo systemctl is-active mariadb > /dev/null 2>&1 || sudo systemctl restart mariadb
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[keepalive-3] ${CODE}"
+          done
 
   keepalive-4:
     runs-on: ubuntu-latest
@@ -467,80 +685,58 @@ ROUTEREOF
       - name: Offset 240s
         run: sleep 240
       - uses: actions/checkout@v4
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          extensions: mbstring, sqlite3, pdo_sqlite, gd, zip, curl, xml, opcache
-      - name: 서버+터널 유지
+      - name: 전체 스택 기동
         env:
-          WP_TUNNEL_TOKEN: ${{ secrets.WP_TUNNEL_TOKEN }}
-          PLA_TUNNEL_TOKEN: ${{ secrets.PLA_TUNNEL_TOKEN }}
+          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
+          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
+          DB_PASS:          ${{ secrets.DB_PASS }}
+          REDIS_PASS:       ${{ secrets.REDIS_PASS }}
         run: |
           CFG="deploy/tunnel-config.json"
-          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8888))" || echo 8888)
-          WP_PORT2=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port_2',8889))" || echo 8889)
-          PLA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_port',8999))" || echo 8999)
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          PMA_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_port',8081))" || echo 8081)
           WP_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wordpress_dir','wordpress'))" || echo wordpress)
-          PLA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pla_dir','wordpress/wp-content/phpliteadmin'))" || echo "wordpress/wp-content/phpliteadmin")
+          PMA_DIR=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('pma_dir','wordpress/wp-content/phpmyadmin'))" || echo "wordpress/wp-content/phpmyadmin")
           HOST_IP=$(hostname -I | awk '{print $1}')
-          ABS_WP_DIR="$(pwd)/${WP_DIR}"
-          ABS_PLA_DIR="$(pwd)/${PLA_DIR}"
-          mkdir -p /tmp/php-servers
-
-          cat > /tmp/wp-router.php << 'ROUTEREOF'
-<?php
-$d=($_SERVER['DOCUMENT_ROOT']!==''&&$_SERVER['DOCUMENT_ROOT']!==false)?$_SERVER['DOCUMENT_ROOT']:getcwd();
-$uri=urldecode(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
-$f=rtrim($d,'/').'/'.ltrim($uri,'/');
-if($uri!=='/'&&file_exists($f)&&!is_dir($f)){return false;}
-chdir($d);$h=$d.'/wp-blog-header.php';
-if(file_exists($h)){require $h;}else{http_response_code(503);echo 'WP not found';}
-ROUTEREOF
-
-          [ -d "$ABS_WP_DIR" ] && for PORT in $WP_PORT $WP_PORT2; do
-            php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-              -t "${ABS_WP_DIR}" -d display_errors=0 -d memory_limit=256M \
-              >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-            echo $! > "/tmp/php-servers/php-${PORT}.pid"
-          done
-          [ -d "$ABS_PLA_DIR" ] && {
-            php -S "0.0.0.0:${PLA_PORT}" -t "${ABS_PLA_DIR}" -d display_errors=0 \
-              >> /tmp/php-pla.log 2>&1 & echo $! > /tmp/php-pla.pid
-          }
-          sleep 3
-
-          curl -sSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -o /tmp/cf.deb
+          WP_ABS="$(pwd)/${WP_DIR}"; PMA_ABS="$(pwd)/${PMA_DIR}"
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends nginx php8.3-fpm php8.3-mysql php8.3-gd php8.3-curl php8.3-xml php8.3-mbstring php8.3-zip php8.3-intl php8.3-redis php8.3-opcache mariadb-server mariadb-client redis-server 2>/dev/null
+          sudo systemctl start mariadb; sleep 2
+          sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4; CREATE USER IF NOT EXISTS 'wpuser'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}'; GRANT ALL ON wordpress.* TO 'wpuser'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null
+          WP_ROWS=$(mysql -u wpuser -p"${DB_PASS}" -h 127.0.0.1 -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress';" 2>/dev/null | tail -1 || echo "0")
+          [ "$WP_ROWS" = "0" ] && [ -f "${WP_DIR}/db-backup/latest.sql.gz" ] && zcat "${WP_DIR}/db-backup/latest.sql.gz" | sudo mysql -u root wordpress
+          printf "bind 127.0.0.1\nport 6379\ndaemonize yes\nrequirepass ${REDIS_PASS}\nmaxmemory 128mb\nmaxmemory-policy allkeys-lru\nsave \"\"\n" | sudo tee /etc/redis/redis.conf > /dev/null && sudo systemctl restart redis-server; sleep 1
+          printf "opcache.enable=1\nopcache.memory_consumption=128\nopcache.max_accelerated_files=10000\nopcache.revalidate_freq=0\nopcache.validate_timestamps=0\n" | sudo tee /etc/php/8.3/fpm/conf.d/10-opcache-wp.ini > /dev/null
+          printf "[www]\nuser=www-data\ngroup=www-data\nlisten=127.0.0.1:9000\npm=dynamic\npm.max_children=10\npm.start_servers=2\npm.min_spare_servers=2\npm.max_spare_servers=5\npm.max_requests=500\n" | sudo tee /etc/php/8.3/fpm/pool.d/www.conf > /dev/null
+          printf "[www2]\nuser=www-data\ngroup=www-data\nlisten=127.0.0.1:9001\npm=ondemand\npm.max_children=10\npm.process_idle_timeout=30s\n" | sudo tee /etc/php/8.3/fpm/pool.d/www2.conf > /dev/null
+          sudo systemctl restart php8.3-fpm; sleep 1
+          [ -f "${WP_ABS}/wp-config.php" ] && sudo sed -i "s/define('DB_PASSWORD', '[^']*')/define('DB_PASSWORD', '${DB_PASS}')/" "${WP_ABS}/wp-config.php"
+          printf "upstream php_fpm_pool { least_conn; server 127.0.0.1:9000 weight=5; server 127.0.0.1:9001 weight=3 backup; keepalive 16; }\n" | sudo tee /etc/nginx/conf.d/upstream-phpfpm.conf > /dev/null
+          sudo tee /etc/nginx/sites-available/wordpress > /dev/null << NGXEOF
+          server { listen ${WP_PORT}; server_name _; root ${WP_ABS}; index index.php; client_max_body_size 64M; gzip on; gzip_types text/plain text/css application/json application/javascript; location ~* \.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg|webp)$ { expires 1y; add_header Cache-Control "public, immutable"; try_files \$uri =404; } location / { try_files \$uri \$uri/ /index.php?\$args; } location ~ \.php$ { fastcgi_pass php_fpm_pool; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_param HTTPS on; fastcgi_param SERVER_PORT 443; include fastcgi_params; fastcgi_buffers 16 16k; fastcgi_buffer_size 32k; } location = /xmlrpc.php { deny all; } location ~* /\. { deny all; } }
+          NGXEOF
+          sudo tee /etc/nginx/sites-available/phpmyadmin > /dev/null << NGXEOF
+          server { listen ${PMA_PORT}; server_name _; root ${PMA_ABS}; index index.php; location / { try_files \$uri \$uri/ /index.php?\$args; } location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name; fastcgi_param HTTPS on; include fastcgi_params; } }
+          NGXEOF
+          sudo ln -sf /etc/nginx/sites-available/wordpress /etc/nginx/sites-enabled/
+          sudo ln -sf /etc/nginx/sites-available/phpmyadmin /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo chown -R www-data:www-data "${WP_ABS}/" 2>/dev/null || true
+          sudo nginx -t 2>&1 | tail -1 && sudo systemctl restart nginx; sleep 1
+          CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[keepalive-4] WP: ${CODE}"
+          CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+          for _t in 1 2 3; do curl -sSL -f "$CF_URL" -o /tmp/cf.deb && break; sleep 5; done
           dpkg -x /tmp/cf.deb /tmp/cf-pkg && sudo cp /tmp/cf-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
-
-          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-            --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
-          [ -n "$PLA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-            --token "$PLA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PLA_PORT}" \
-            --logfile /tmp/cf-pla.log 2>&1 & echo $! > /tmp/cf-pla.pid
-          sleep 4
-
-          CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0")
-          echo "[keepalive-4] WP 터널: $CONN"
-          if [ "$CONN" = "0" ] && [ -n "$WP_TUNNEL_TOKEN" ]; then
-            kill "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || true; sleep 3
-            cloudflared tunnel --no-autoupdate run \
-              --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" \
-              --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid; sleep 4
-          fi
-
-          check_ports() {
-            for PORT in $WP_PORT $WP_PORT2; do
-              CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://${HOST_IP}:${PORT}/" 2>/dev/null || echo "000")
-              [ "$CODE" = "000" ] && {
-                kill "$(cat /tmp/php-servers/php-${PORT}.pid 2>/dev/null)" 2>/dev/null || true; sleep 1
-                [ -d "$ABS_WP_DIR" ] && php -S "0.0.0.0:${PORT}" /tmp/wp-router.php \
-                  -t "${ABS_WP_DIR}" -d display_errors=0 \
-                  >> "/tmp/php-servers/php-${PORT}.log" 2>&1 &
-                echo $! > "/tmp/php-servers/php-${PORT}.pid"
-              } || echo "[OK] 포트 ${PORT}: ${CODE}"
-            done
-          }
-          sleep 90; check_ports; echo "[90s] keepalive-4"
-          sleep 90; check_ports; echo "[180s] keepalive-4"
-          sleep 90; echo "keepalive-4 완료"
+          [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:${WP_PORT}" --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
+          [ -n "$PMA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run --token "$PMA_TUNNEL_TOKEN" --url "http://${HOST_IP}:${PMA_PORT}" --logfile /tmp/cf-pma.log 2>&1 & echo $! > /tmp/cf-pma.pid
+          sleep 4; CONN=$(grep -c "Registered tunnel connection" /tmp/cf-wp.log 2>/dev/null || echo "0"); echo "[keepalive-4] 터널: $CONN"
+      - name: 유지
+        run: |
+          CFG="deploy/tunnel-config.json"
+          WP_PORT=$([ -f "$CFG" ] && python3 -c "import json; print(json.load(open('$CFG')).get('wp_port',8080))" || echo 8080)
+          HOST_IP=$(hostname -I | awk '{print $1}')
+          for tick in 90 90 90; do
+            sleep $tick
+            sudo systemctl is-active nginx > /dev/null 2>&1 || sudo systemctl restart nginx
+            sudo systemctl is-active mariadb > /dev/null 2>&1 || sudo systemctl restart mariadb
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "http://${HOST_IP}:${WP_PORT}/" 2>/dev/null || echo "000"); echo "[keepalive-4] ${CODE}"
+          done
