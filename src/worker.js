@@ -167,7 +167,7 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
       "SELECT site_id FROM site_credentials WHERE site_id=?"
     ).bind(siteId).first();
     if (!existingCred) {
-      const redisEnabled = 1; // 로컬 Redis 7 — 항상 활성화
+      const redisEnabled = 1; // 로컬 Redis 7 — 항상 활성
       await env.DB.prepare(
         `INSERT INTO site_credentials
          (site_id,pla_username,pla_password_hash,pla_password_plain_enc,
@@ -177,12 +177,12 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
       ).bind(
         siteId, "admin", plaPassHash, plaPassEnc,
         wpAdminUser, wpAdminPassEnc,
-        "wp-content/database/wordpress.db",
+        "mariadb://wordpress",
         redisEnabled,
-        "로컬 Redis 7 (GitHub Actions)",
-        "9000,9001",
-        "9000,9001",
-        "9000,9001"
+        "Redis 7 (로컬, 무료)",
+        "8080",
+        "8081",
+        "8080,8081"
       ).run();
     }
 
@@ -316,7 +316,7 @@ async function handleApi(request, env, url) {
     if (!payload) return err("JWT 검증 실패", 401);
 
     const body = await request.json().catch(() => ({}));
-    const { siteId, tunnelWpUrl, tunnelPlaUrl, tunnelPmaUrl, workerUrl: cbWorkerUrl, finalSiteUrl, status } = body;
+    const { siteId, tunnelWpUrl, tunnelPlaUrl, status } = body;
     if (!siteId) return err("siteId가 필요합니다.");
 
     // userId 확인 (site 소유자가 발급한 JWT)
@@ -326,10 +326,8 @@ async function handleApi(request, env, url) {
     // 터널 URL 및 상태 업데이트
     const updates = [];
     const binds = [];
-    const resolvedWpUrl = tunnelWpUrl || cbWorkerUrl || finalSiteUrl;
-    const resolvedPmaUrl = tunnelPlaUrl || tunnelPmaUrl;
-    if (resolvedWpUrl)  { updates.push("cf_worker_url=?");  binds.push(resolvedWpUrl); }
-    if (resolvedPmaUrl) { updates.push("tunnel_pla_url=?"); binds.push(resolvedPmaUrl); }
+    if (tunnelWpUrl)  { updates.push("cf_worker_url=?");  binds.push(tunnelWpUrl); }
+    if (tunnelPlaUrl) { updates.push("tunnel_pla_url=?"); binds.push(tunnelPlaUrl); }
     if (status)       { updates.push("status=?");         binds.push(status); }
     updates.push("updated_at=strftime('%s','now')");
     if (updates.length > 1) {
@@ -864,7 +862,7 @@ async function handleApi(request, env, url) {
       },
       redis: {
         enabled: !!row.redis_enabled,
-        provider: row.redis_enabled ? "로컬 Redis 7 (GitHub Actions)" : null,
+        provider: row.redis_enabled ? "Upstash 서버리스 Redis" : null,
       },
       domain: {
         customDomain: site.custom_domain,
