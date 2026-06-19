@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>인스턴스 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    .instance-toolbar {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-5);
+    }
+    .instance-toolbar__search {
+      flex: 1;
+      min-width: 220px;
+      position: relative;
+    }
+    .instance-toolbar__search svg {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-tertiary);
+    }
+    .instance-toolbar__search input {
+      width: 100%;
+      height: 40px;
+      padding: 0 var(--space-3) 0 40px;
+      border-radius: var(--radius-m);
+      border: 1px solid var(--border-secondary);
+      background: var(--color-white);
+      font-size: var(--fs-body-2);
+      font-family: inherit;
+      outline: none;
+    }
+    .instance-toolbar__search input:focus {
+      border-color: var(--border-primary);
+      box-shadow: 0 0 0 3px var(--color-blue-50);
+    }
+    .instance-toolbar__select {
+      height: 40px;
+      padding: 0 var(--space-3);
+      border-radius: var(--radius-m);
+      border: 1px solid var(--border-secondary);
+      background: var(--color-white);
+      font-size: var(--fs-body-2);
+      font-family: inherit;
+      color: var(--text-primary);
+      outline: none;
+      cursor: pointer;
+    }
+
+    .instance-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: var(--space-4);
+    }
+
+    .instance-card {
+      background: var(--color-white);
+      border: 1px solid var(--border-secondary);
+      border-radius: var(--radius-2xl);
+      box-shadow: var(--shadow-1);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: box-shadow var(--dur-base) var(--ease), transform var(--dur-base) var(--ease);
+    }
+    .instance-card:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
+
+    .instance-card__top {
+      padding: var(--space-5) var(--space-5) var(--space-4);
+      cursor: pointer;
+    }
+    .instance-card__head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-2);
+      margin-bottom: 6px;
+    }
+    .instance-card__name {
+      font-size: var(--fs-h4);
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .instance-card__domain {
+      font-size: var(--fs-body-3);
+      color: var(--text-secondary);
+      font-family: monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .instance-card__metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3) var(--space-4);
+      padding: var(--space-4) var(--space-5);
+      background: var(--color-grey-50);
+      border-top: 1px solid var(--border-secondary);
+    }
+    .metric-mini__label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: var(--fs-label-s);
+      color: var(--text-secondary);
+      font-weight: 600;
+      margin-bottom: 5px;
+    }
+    .metric-mini__value {
+      font-size: var(--fs-title-2);
+      font-weight: 700;
+      font-feature-settings: var(--font-feature-numeric-tabular);
+      margin-bottom: 5px;
+    }
+    .metric-mini__track {
+      height: 5px;
+      border-radius: var(--radius-full);
+      background: var(--color-grey-200);
+      overflow: hidden;
+    }
+    .metric-mini__fill {
+      height: 100%;
+      border-radius: var(--radius-full);
+    }
+    .metric-mini__fill--ok   { background: var(--color-green-500); }
+    .metric-mini__fill--warn { background: var(--color-orange-500); }
+    .metric-mini__fill--bad  { background: var(--color-red-500); }
+
+    .instance-card__footer {
+      display: flex;
+      gap: var(--space-2);
+      padding: var(--space-3) var(--space-5);
+      border-top: 1px solid var(--border-secondary);
+    }
+    .instance-card__footer .btn { width: auto; flex: 1; }
+
+    /* ── 새 인스턴스 모달 ── */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.5);
+      z-index: 100;
+      align-items: center; justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-box {
+      background: var(--color-white);
+      border-radius: var(--radius-2xl);
+      padding: var(--space-6);
+      width: 100%; max-width: 440px;
+      box-shadow: var(--shadow-3);
+      margin: var(--space-4);
+    }
+    .modal-box h3 { font-size: var(--fs-h3); font-weight: 700; margin: 0 0 var(--space-4); }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="top-bar">
+      <span class="top-bar__brand">wpspot</span>
+    </div>
+
+    <div class="screen">
+      <div class="section__header">
+        <div>
+          <h1 class="h1" style="margin-bottom:2px;">인스턴스</h1>
+          <p class="body-2">생성한 모든 호스팅 인스턴스를 한눈에 확인하고 관리하세요.</p>
+        </div>
+        <button class="btn btn--primary btn--m" style="width:auto;" onclick="openCreateModal()">
+          + 새 인스턴스
+        </button>
+      </div>
+
+      <div class="instance-toolbar">
+        <div class="instance-toolbar__search">
+          <span id="searchIcon"></span>
+          <input type="text" id="searchInput" placeholder="이름 또는 도메인으로 검색" oninput="renderGrid()" />
+        </div>
+        <select class="instance-toolbar__select" id="statusFilter" onchange="renderGrid()">
+          <option value="">전체 상태</option>
+          <option value="active">운영 중</option>
+          <option value="provisioning">구성 중</option>
+          <option value="pending">대기</option>
+          <option value="error">오류</option>
+        </select>
+      </div>
+
+      <div id="instanceGrid" class="instance-grid">
+        <div class="empty">불러오는 중…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 새 인스턴스 생성 모달 -->
+  <div class="modal-overlay" id="createModal">
+    <div class="modal-box">
+      <h3>새 인스턴스 만들기</h3>
+      <div class="field">
+        <label class="field__label" for="newInstanceName">인스턴스 이름</label>
+        <input class="field__input" id="newInstanceName" placeholder="예: 내 블로그" maxlength="60" />
+        <div class="field__help">생성 후 인스턴스 상세 화면에서 도메인을 연결하면 자동으로 구성이 시작돼요.</div>
+      </div>
+      <div id="createInstanceError" class="field__help is-error hidden"></div>
+      <div class="row" style="margin-top:var(--space-4);justify-content:flex-end;">
+        <button class="btn btn--secondary btn--m" style="width:auto;" onclick="closeCreateModal()">취소</button>
+        <button class="btn btn--primary btn--m" style="width:auto;" id="createInstanceBtn" onclick="createInstance()">만들기</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    wpspot.renderShell("instance", "인스턴스");
+    document.getElementById("searchIcon").innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+
+    let allSites = [];
+
+    if (wpspot.requireAuth()) load();
+
+    async function load() {
+      const grid = document.getElementById("instanceGrid");
+      try {
+        const data = await wpspot.api("/api/sites");
+        allSites = data.sites || [];
+        renderGrid();
+      } catch (e) {
+        grid.innerHTML = `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    // 실제 모니터링(CF Analytics 등) 연동 전까지, 사이트 ID 기반의 안정적인 의사난수로
+    // 데모용 지표를 만든다. site.id가 같으면 매번 같은 값이 나온다.
+    function seedFrom(str) {
+      let h = 0;
+      for (let i = 0; i < str.length; i++) { h = (h * 31 + str.charCodeAt(i)) >>> 0; }
+      return h;
+    }
+    function metricsFor(site) {
+      if (site.status !== "active") {
+        return { cpu: 0, ram: 0, cacheHit: 0, speedMs: null };
+      }
+      const seed = seedFrom(site.id);
+      const cpu      = 8 + (seed % 55);            // 8~62%
+      const ram      = 15 + ((seed >> 3) % 60);     // 15~74%
+      const cacheHit = 55 + ((seed >> 6) % 44);     // 55~98%
+      const speedMs  = 80 + ((seed >> 9) % 340);    // 80~419ms
+      return { cpu, ram, cacheHit, speedMs };
+    }
+    function levelClass(pct, invert = false) {
+      const v = invert ? 100 - pct : pct;
+      if (v >= 80) return "metric-mini__fill--bad";
+      if (v >= 55) return "metric-mini__fill--warn";
+      return "metric-mini__fill--ok";
+    }
+
+    function renderGrid() {
+      const grid = document.getElementById("instanceGrid");
+      const q = (document.getElementById("searchInput").value || "").trim().toLowerCase();
+      const statusFilter = document.getElementById("statusFilter").value;
+
+      const filtered = allSites.filter(s => {
+        const matchesQuery = !q ||
+          (s.site_name || "").toLowerCase().includes(q) ||
+          (s.custom_domain || "").toLowerCase().includes(q) ||
+          (s.site_slug || "").toLowerCase().includes(q);
+        const matchesStatus = !statusFilter || s.status === statusFilter;
+        return matchesQuery && matchesStatus;
+      });
+
+      if (!filtered.length) {
+        grid.innerHTML = allSites.length
+          ? `<div class="empty">검색 결과가 없어요.</div>`
+          : `<div class="empty">아직 생성된 인스턴스가 없어요.<br/><br/>
+              <button class="btn btn--primary btn--m" style="width:auto;" onclick="openCreateModal()">+ 첫 인스턴스 만들기</button>
+            </div>`;
+        return;
+      }
+
+      grid.innerHTML = filtered.map(cardHtml).join("");
+    }
+
+    function cardHtml(site) {
+      const m = metricsFor(site);
+      const domain = site.custom_domain || "도메인 미연결";
+      const detailUrl = `/instance-detail.html?site=${encodeURIComponent(site.id)}`;
+      return `
+        <div class="instance-card">
+          <div class="instance-card__top" onclick="location.href='${detailUrl}'">
+            <div class="instance-card__head">
+              <div>
+                <div class="instance-card__name">${wpspot.escapeHtml(site.site_name)}</div>
+                <div class="instance-card__domain">${wpspot.escapeHtml(domain)}</div>
+              </div>
+              ${wpspot.statusBadge(site.status)}
+            </div>
+          </div>
+
+          <div class="instance-card__metrics">
+            <div>
+              <div class="metric-mini__label">CPU 사용량</div>
+              <div class="metric-mini__value">${site.status === 'active' ? m.cpu + '%' : '—'}</div>
+              <div class="metric-mini__track"><div class="metric-mini__fill ${levelClass(m.cpu)}" style="width:${m.cpu}%"></div></div>
+            </div>
+            <div>
+              <div class="metric-mini__label">RAM 사용량</div>
+              <div class="metric-mini__value">${site.status === 'active' ? m.ram + '%' : '—'}</div>
+              <div class="metric-mini__track"><div class="metric-mini__fill ${levelClass(m.ram)}" style="width:${m.ram}%"></div></div>
+            </div>
+            <div>
+              <div class="metric-mini__label">캐시 히트율</div>
+              <div class="metric-mini__value">${site.status === 'active' ? m.cacheHit + '%' : '—'}</div>
+              <div class="metric-mini__track"><div class="metric-mini__fill ${levelClass(m.cacheHit, true)}" style="width:${m.cacheHit}%"></div></div>
+            </div>
+            <div>
+              <div class="metric-mini__label">평균 응답속도</div>
+              <div class="metric-mini__value">${m.speedMs ? m.speedMs + 'ms' : '—'}</div>
+              <div class="metric-mini__track"><div class="metric-mini__fill ${m.speedMs && m.speedMs < 200 ? 'metric-mini__fill--ok' : m.speedMs && m.speedMs < 350 ? 'metric-mini__fill--warn' : m.speedMs ? 'metric-mini__fill--bad' : ''}" style="width:${m.speedMs ? Math.min(100, m.speedMs / 5) : 0}%"></div></div>
+            </div>
+          </div>
+
+          <div class="instance-card__footer">
+            <a class="btn btn--secondary btn--m" href="${detailUrl}">관리</a>
+            ${site.custom_domain ? `<a class="btn btn--ghost btn--m" href="https://${wpspot.escapeHtml(site.custom_domain)}" target="_blank">사이트 열기 ↗</a>` : ""}
+          </div>
+        </div>
+      `;
+    }
+
+    function openCreateModal() {
+      document.getElementById("createInstanceError").classList.add("hidden");
+      document.getElementById("newInstanceName").value = "";
+      document.getElementById("createModal").classList.add("open");
+    }
+    function closeCreateModal() {
+      document.getElementById("createModal").classList.remove("open");
+    }
+    async function createInstance() {
+      const name = document.getElementById("newInstanceName").value.trim();
+      const errEl = document.getElementById("createInstanceError");
+      errEl.classList.add("hidden");
+      if (!name) {
+        errEl.textContent = "인스턴스 이름을 입력해주세요.";
+        errEl.classList.remove("hidden");
+        return;
+      }
+      const btn = document.getElementById("createInstanceBtn");
+      btn.disabled = true;
+      try {
+        const res = await wpspot.api("/api/sites", {
+          method: "POST",
+          body: JSON.stringify({ siteName: name }),
+        });
+        closeCreateModal();
+        wpspot.toast("인스턴스가 생성됐어요. 도메인을 연결해주세요.", "success");
+        location.href = `/instance-detail.html?site=${encodeURIComponent(res.id)}`;
+      } catch (e) {
+        errEl.textContent = e.message;
+        errEl.classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
