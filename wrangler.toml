@@ -29,8 +29,10 @@ APP_ENV  = "production"
 # Worker 자신의 공개 URL (콜백 URL 생성용)
 WPSPOT_BASE_URL = "https://cloud-press.co.kr"
 
-# Redis: GitHub Actions runner에서 로컬 Redis 7을 사용합니다 (무료, 서버리스 Redis 불필요)
-# Redis 비밀번호는 GitHub Secret(REDIS_PASS)으로 자동 관리됩니다.
+# 스택 정보: nginx + PHP-FPM 8.3 + MariaDB + Redis 7 (로컬, 무료)
+# GitHub Actions Secrets (provision 시 자동 등록):
+#   DB_PASS, REDIS_PASS, WP_TUNNEL_TOKEN, PMA_TUNNEL_TOKEN
+# phpMyAdmin URL: https://{pma_worker}.{account_id}.workers.dev""
 
 [observability]
 enabled = false
