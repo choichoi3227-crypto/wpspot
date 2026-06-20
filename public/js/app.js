@@ -101,12 +101,14 @@ const wpspot = (() => {
   }
 
   // ── 상태 배지 ────────────────────────────────────────────────────────────
+  // 프로비저닝 흐름: pending → provisioning(GitHub Actions 시작) → setting_up(DNS/DB/터널 세팅) → active(워드프레스 가동)
   function statusBadge(status) {
     const map = {
-      active:       ["#d1fae5", "#065f46", "● 운영 중"],
-      pending:      ["#fef3c7", "#92400e", "○ 대기"],
-      provisioning: ["#dbeafe", "#1d4ed8", "◌ 구성 중"],
-      error:        ["#fee2e2", "#991b1b", "✕ 오류"],
+      active:        ["#d1fae5", "#065f46", "● 서버 가동 중"],
+      setting_up:    ["#e0e7ff", "#3730a3", "◐ 서버 세팅 중"],
+      provisioning:  ["#dbeafe", "#1d4ed8", "◌ 서버 생성 중"],
+      pending:       ["#fef3c7", "#92400e", "○ 대기"],
+      error:         ["#fee2e2", "#991b1b", "✕ 오류"],
     };
     const [bg, color, label] = map[status] || map.pending;
     return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;
