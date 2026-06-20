@@ -202,20 +202,38 @@ export async function deployModuleWorker(email, globalApiKey, accountId, scriptN
 // ── Cloudflare Cache 제거 ──────────────────────────────────────────────────
 
 // Worker Route가 매칭되려면 해당 호스트명에 proxied DNS 레코드가 존재해야 함.
-// 실제 origin은 Worker가 처리하므로 더미 IP(192.0.2.1, TEST-NET-1)를 사용.
-export async function ensureProxiedRecord(email, globalApiKey, zoneId, hostname) {
+// CNAME 레코드를 사용 — target을 지정하면 해당 호스트(예: workers.dev 서브도메인)를
+// 가리키는 CNAME으로 생성/갱신하고, target이 없으면 placeholder CNAME(자기 zone의 루트)을 사용한다.
+// (예전에는 A 레코드 + 더미 IP(192.0.2.1)를 사용했으나, Cloudflare가 "CNAME이어야 할 자리에
+// A 레코드가 생성된다"는 사용자 보고가 있어 CNAME 기반으로 통일함)
+export async function ensureProxiedRecord(email, globalApiKey, zoneId, hostname, target) {
+  const cnameTarget = target || hostname; // target 미지정 시 자기참조(placeholder) CNAME
   const records = await listDnsRecords(email, globalApiKey, zoneId);
   const existing = records.find(r => r.name === hostname && (r.type === "A" || r.type === "CNAME"));
+
   if (existing) {
-    if (!existing.proxied) {
-      await updateDnsRecord(email, globalApiKey, zoneId, existing.id, {
-        type: existing.type, name: hostname, content: existing.content, proxied: true, ttl: 1,
+    const needsUpdate =
+      existing.type !== "CNAME" ||
+      !existing.proxied ||
+      (target && existing.content !== target);
+    if (needsUpdate) {
+      // 기존 A 레코드를 CNAME으로 전환하려면 먼저 삭제 후 재생성해야 하는 경우가 있어
+      // (레코드 타입 변경은 update로 안 되는 CF 계정이 있음) 안전하게 삭제 → 생성으로 처리.
+      if (existing.type !== "CNAME") {
+        await deleteDnsRecord(email, globalApiKey, zoneId, existing.id);
+        return await createDnsRecord(email, globalApiKey, zoneId, {
+          type: "CNAME", name: hostname, content: cnameTarget, proxied: true, ttl: 1,
+        });
+      }
+      return await updateDnsRecord(email, globalApiKey, zoneId, existing.id, {
+        type: "CNAME", name: hostname, content: cnameTarget, proxied: true, ttl: 1,
       });
     }
     return existing;
   }
+
   return await createDnsRecord(email, globalApiKey, zoneId, {
-    type: "A", name: hostname, content: "192.0.2.1", proxied: true, ttl: 1,
+    type: "CNAME", name: hostname, content: cnameTarget, proxied: true, ttl: 1,
   });
 }
 
