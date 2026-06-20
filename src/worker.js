@@ -277,7 +277,7 @@ async function handleApi(request, env, url) {
     if (!user || !await verifyPassword(password, user.password_hash))
       return err("이메일 또는 비밀번호가 올바르지 않습니다.", 401);
     const token = await signJWT({ sub: user.id, email: user.email }, env.JWT_SECRET);
-    return json({ token, user: { id: user.id, email: user.email, displayName: user.display_name } });
+    return json({ token, user: { id: user.id, email: user.email, displayName: user.display_name, isAdmin: !!user.is_admin, plan: user.plan || "light" } });
   }
 
   // ── phpMyAdmin 토큰 인증 (공개, 기존 PLA 토큰 테이블 호환) ────────────────
@@ -383,7 +383,109 @@ async function handleApi(request, env, url) {
   if (!authUser) return err("로그인이 필요합니다.", 401);
   const userId = authUser.sub;
 
-  // ── 계정 자격증명 ─────────────────────────────────────────────────────────
+  // 마이그레이션 v10: users.is_admin / users.plan / users.active
+  const currentUser = await env.DB.prepare(
+    "SELECT id,email,display_name,is_admin,plan,active FROM users WHERE id=?"
+  ).bind(userId).first();
+  if (!currentUser) return err("계정을 찾을 수 없습니다.", 401);
+  if (currentUser.active === 0) return err("정지된 계정이에요. 관리자에게 문의해주세요.", 403);
+  const isAdmin = !!currentUser.is_admin;
+
+  // 관리자(admin)는 모든 플랜 제한을 무시합니다. (항목 6)
+  const PLAN_LIMITS = { light: 1, standard: 3, smart: 10 };
+  function siteLimitFor(plan) {
+    return isAdmin ? Infinity : (PLAN_LIMITS[plan] ?? PLAN_LIMITS.light);
+  }
+
+  // ── 관리자 전용 API ───────────────────────────────────────────────────────
+
+  if (pathname === "/api/admin/users" && method === "GET") {
+    if (!isAdmin) return err("관리자 권한이 필요합니다.", 403);
+    const { results } = await env.DB.prepare(
+      `SELECT u.id, u.email, u.display_name AS name, u.plan, u.is_admin, u.active, u.created_at,
+              (SELECT COUNT(*) FROM sites s WHERE s.user_id = u.id) AS hosting_count
+       FROM users u ORDER BY u.created_at DESC`
+    ).all();
+    return json({ users: results.map(r => ({ ...r, active: !!r.active, is_admin: !!r.is_admin })) });
+  }
+
+  const adminUserMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (adminUserMatch && method === "GET") {
+    if (!isAdmin) return err("관리자 권한이 필요합니다.", 403);
+    const target = await env.DB.prepare(
+      `SELECT u.id, u.email, u.display_name AS name, u.plan, u.is_admin, u.active, u.created_at
+       FROM users u WHERE u.id=?`
+    ).bind(adminUserMatch[1]).first();
+    if (!target) return err("사용자를 찾을 수 없습니다.", 404);
+    const { results: sites } = await env.DB.prepare(
+      "SELECT id, site_name, site_slug, status, plan, created_at FROM sites WHERE user_id=? ORDER BY created_at DESC"
+    ).bind(adminUserMatch[1]).all();
+    return json({ user: { ...target, active: !!target.active, is_admin: !!target.is_admin }, sites });
+  }
+
+  if (adminUserMatch && method === "PATCH") {
+    if (!isAdmin) return err("관리자 권한이 필요합니다.", 403);
+    const body = await request.json().catch(() => ({}));
+    const sets = [];
+    const binds = [];
+    if (typeof body.active === "boolean") { sets.push("active=?"); binds.push(body.active ? 1 : 0); }
+    if (typeof body.isAdmin === "boolean") { sets.push("is_admin=?"); binds.push(body.isAdmin ? 1 : 0); }
+    if (body.plan && PLAN_LIMITS[body.plan] !== undefined) { sets.push("plan=?"); binds.push(body.plan); }
+    if (!sets.length) return err("변경할 값이 없습니다.");
+    await env.DB.prepare(`UPDATE users SET ${sets.join(",")} WHERE id=?`).bind(...binds, adminUserMatch[1]).run();
+    return json({ ok: true });
+  }
+
+  // ── 공지사항 ─────────────────────────────────────────────────────────────
+
+  if (pathname === "/api/notices" && method === "GET") {
+    const { results } = await env.DB.prepare(
+      "SELECT id, title, body, level, created_at FROM notices WHERE active=1 ORDER BY created_at DESC LIMIT 20"
+    ).all().catch(() => ({ results: [] }));
+    return json({ notices: results });
+  }
+
+  // ── 결제수단 ─────────────────────────────────────────────────────────────
+
+  if (pathname === "/api/payment/methods" && method === "GET") {
+    const { results } = await env.DB.prepare(
+      "SELECT id, type, brand, last4, paypal_email, is_default, created_at FROM payment_methods WHERE user_id=? ORDER BY is_default DESC, created_at DESC"
+    ).bind(userId).all().catch(() => ({ results: [] }));
+    return json({ methods: results });
+  }
+
+  if (pathname === "/api/payment/methods" && method === "POST") {
+    const body = await request.json().catch(() => ({}));
+    const id = uid();
+    await env.DB.prepare(
+      `INSERT INTO payment_methods (id,user_id,type,brand,last4,is_default)
+       VALUES (?,?,?,?,?, (SELECT CASE WHEN COUNT(*)=0 THEN 1 ELSE 0 END FROM payment_methods WHERE user_id=?))`
+    ).bind(id, userId, body.type || "card", body.brand || "VISA", String(body.last4 || "0000").slice(-4), userId).run();
+    return json({ ok: true, id });
+  }
+
+  if (pathname === "/api/payment/paypal" && method === "POST") {
+    const body = await request.json().catch(() => ({}));
+    if (!body.paypalEmail) return err("PayPal 이메일을 입력해주세요.");
+    const id = uid();
+    await env.DB.prepare(
+      `INSERT INTO payment_methods (id,user_id,type,paypal_email,is_default)
+       VALUES (?,?,'paypal',?, (SELECT CASE WHEN COUNT(*)=0 THEN 1 ELSE 0 END FROM payment_methods WHERE user_id=?))`
+    ).bind(id, userId, body.paypalEmail, userId).run();
+    return json({ ok: true, id });
+  }
+
+  // ── 청구/인보이스 ────────────────────────────────────────────────────────
+
+  if (pathname === "/api/billing/invoices" && method === "GET") {
+    const year = url.searchParams.get("year") || String(new Date().getFullYear());
+    const { results } = await env.DB.prepare(
+      `SELECT id, plan, amount, currency, status, year, month, created_at
+       FROM billing_invoices WHERE user_id=? AND year=? ORDER BY month DESC`
+    ).bind(userId, year).all().catch(() => ({ results: [] }));
+    return json({ invoices: results });
+  }
+
 
   if (pathname === "/api/account/credentials" && method === "GET") {
     const row = await env.DB.prepare(
@@ -470,7 +572,7 @@ async function handleApi(request, env, url) {
   if (pathname === "/api/sites" && method === "GET") {
     const { results } = await env.DB.prepare(
       `SELECT id, site_name, site_slug, github_repo, cf_worker_url, tunnel_pla_url,
-              status, custom_domain, cf_zone_id, created_at
+              status, custom_domain, cf_zone_id, plan, created_at
        FROM sites WHERE user_id=? ORDER BY created_at DESC`
     ).bind(userId).all();
     return json({ sites: results });
@@ -484,11 +586,79 @@ async function handleApi(request, env, url) {
     if (siteName.trim().length > 60) return err("사이트 이름은 60자 이하로 입력해주세요.");
     const siteSlug = slugify(siteName.trim());
     if (siteSlug.length < 3) return err("사이트 이름이 너무 짧아요. 더 길게 입력해주세요.");
+
+    if (!isAdmin) {
+      const { count } = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM sites WHERE user_id=?"
+      ).bind(userId).first();
+      const limit = siteLimitFor(currentUser.plan);
+      if (count >= limit) {
+        return err(`현재 플랜(${currentUser.plan || 'light'})에서는 최대 ${limit}개의 사이트만 만들 수 있어요. 플랜을 업그레이드해주세요.`, 403);
+      }
+    }
+
     const id = uid();
     await env.DB.prepare(
-      "INSERT INTO sites (id,user_id,site_name,site_slug,status) VALUES (?,?,?,?,'pending')"
-    ).bind(id, userId, siteName.trim(), siteSlug).run();
+      "INSERT INTO sites (id,user_id,site_name,site_slug,status,plan) VALUES (?,?,?,?,'pending',?)"
+    ).bind(id, userId, siteName.trim(), siteSlug, currentUser.plan || "light").run();
     return json({ id, siteName: siteName.trim(), siteSlug, status: "pending" });
+  }
+
+  // ── 사이트 단건 조회 (instance-detail.html에서 사용) ────────────────────────
+
+  const siteDetailMatch = pathname.match(/^\/api\/sites\/([^/]+)$/);
+  if (siteDetailMatch && method === "GET") {
+    const siteId = siteDetailMatch[1];
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    const cred = await env.DB.prepare(
+      "SELECT pma_username, db_host, db_port FROM site_credentials WHERE site_id=?"
+    ).bind(siteId).first().catch(() => null);
+    const customDomain = site.custom_domain;
+    return json({
+      id: site.id,
+      displayName: site.site_name,
+      slug: site.site_slug,
+      status: site.status,
+      plan: site.plan || "light",
+      siteUrl: customDomain ? `https://${customDomain}` : (site.cf_worker_url || null),
+      pmaUrl: customDomain ? `https://pma.${customDomain}` : (site.tunnel_pla_url || null),
+      githubRepo: site.github_repo,
+      customDomain: site.custom_domain,
+      createdAt: site.created_at,
+    });
+  }
+
+  // ── 사이트 플랜 변경 (스케일링 슬라이더에서 사용) ───────────────────────────
+
+  const sitePlanMatch = pathname.match(/^\/api\/sites\/([^/]+)\/plan$/);
+  if (sitePlanMatch && method === "PATCH") {
+    const siteId = sitePlanMatch[1];
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    const { plan } = await request.json().catch(() => ({}));
+    if (!plan || PLAN_LIMITS[plan] === undefined) return err("올바른 플랜을 선택해주세요.");
+    await env.DB.prepare("UPDATE sites SET plan=?, updated_at=strftime('%s','now') WHERE id=?").bind(plan, siteId).run();
+    return json({ ok: true, plan });
+  }
+
+  // ── 사이트 재시작 ────────────────────────────────────────────────────────
+
+  const siteRestartMatch = pathname.match(/^\/api\/sites\/([^/]+)\/restart$/);
+  if (siteRestartMatch && method === "POST") {
+    const siteId = siteRestartMatch[1];
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+    await env.DB.prepare(
+      "INSERT INTO site_jobs (id,site_id,job_type,status) VALUES (?,?,'restart','queued')"
+    ).bind(uid(), siteId).run();
+    return json({ ok: true, message: "재시작 작업이 큐에 등록됐어요." });
   }
 
   // ── 사이트 삭제 ───────────────────────────────────────────────────────────
