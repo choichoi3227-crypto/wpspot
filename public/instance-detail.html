@@ -3,616 +3,346 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>인스턴스 관리 — wpspot</title>
+  <title>인스턴스 상세 — wpspot</title>
   <link rel="stylesheet" href="/css/style.css" />
   <style>
-    .detail-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: var(--space-4);
-      flex-wrap: wrap;
-      margin-bottom: var(--space-5);
+    .scaling-section { margin-top:28px; }
+    .scaling-label { font-size:16px;font-weight:700;margin-bottom:4px; }
+    .scaling-sub { font-size:14px;color:var(--text-secondary);margin-bottom:20px; }
+    .plan-slider {
+      display:flex;gap:0;background:var(--color-grey-100);border-radius:12px;padding:4px;position:relative;overflow:hidden;
     }
-    .detail-back {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: var(--fs-body-3);
-      color: var(--text-secondary);
-      margin-bottom: var(--space-2);
+    .plan-opt {
+      flex:1;padding:12px 8px;text-align:center;border-radius:8px;cursor:pointer;
+      font-size:14px;font-weight:600;color:var(--text-secondary);
+      position:relative;z-index:1;transition:color 250ms;user-select:none;
     }
-    .detail-title-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
-    .detail-title { font-size: var(--fs-h1); font-weight: 700; letter-spacing: -0.02em; }
-    .detail-domain { font-size: var(--fs-body-2); color: var(--text-secondary); font-family: monospace; margin-top: 4px; }
-    .detail-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
-    .detail-actions .btn { width: auto; }
-
-    /* ── 탭 ── */
-    .tabs {
-      display: flex;
-      gap: 2px;
-      border-bottom: 1px solid var(--border-secondary);
-      margin-bottom: var(--space-5);
-      overflow-x: auto;
+    .plan-opt--active { color:#fff; }
+    .plan-slider__thumb {
+      position:absolute;top:4px;bottom:4px;background:var(--fill-brand);border-radius:8px;
+      transition:left 280ms cubic-bezier(0.22,0.61,0.36,1),width 280ms cubic-bezier(0.22,0.61,0.36,1);z-index:0;
     }
-    .tab-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 10px var(--space-4);
-      font-size: var(--fs-label-m);
-      font-weight: 600;
-      color: var(--text-secondary);
-      background: transparent;
-      border: none;
-      border-bottom: 2px solid transparent;
-      cursor: pointer;
-      font-family: inherit;
-      white-space: nowrap;
+    .plan-opt__name { font-size:13px; }
+    .plan-opt__price { font-size:11px;margin-top:2px; }
+    .scale-info {
+      margin-top:20px;background:#fff;border:1px solid var(--border-secondary);border-radius:14px;padding:20px 24px;
     }
-    .tab-btn:hover { color: var(--text-primary); }
-    .tab-btn.active { color: var(--text-brand); border-bottom-color: var(--fill-brand); }
-    .tab-panel { display: none; }
-    .tab-panel.active { display: block; }
-
-    /* ── 필드 행 (정보 표시용) ── */
-    .field-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
-    .field-row:last-child { margin-bottom: 0; }
-    .field-label { font-size: var(--fs-body-3); color: var(--text-secondary); font-weight: 600; width: 120px; flex-shrink: 0; }
-    .field-value {
-      flex: 1; min-width: 160px; font-family: monospace; font-size: var(--fs-body-3);
-      background: var(--fill-weak); border: 1px solid var(--border-secondary);
-      border-radius: var(--radius-s); padding: 7px 10px;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      color: var(--text-primary);
-    }
-    .field-value.secret { letter-spacing: 3px; color: var(--text-secondary); }
-    .field-value a { color: var(--text-brand); text-decoration: none; }
-    .field-value a:hover { text-decoration: underline; }
-
-    .status-dot-row { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body-3); }
-    .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .status-dot--on   { background: var(--color-green-500); }
-    .status-dot--off  { background: var(--color-grey-300); }
-    .status-dot--warn { background: var(--color-orange-500); }
-
-    .domain-row {
-      display: flex; align-items: center; gap: var(--space-3);
-      padding: var(--space-3) 0; border-bottom: 1px solid var(--border-secondary);
-      flex-wrap: wrap;
-    }
-    .domain-row:last-child { border-bottom: none; }
-    .domain-row__host { font-family: monospace; font-size: var(--fs-body-2); font-weight: 600; }
-    .domain-row__actions { margin-left: auto; display: flex; gap: var(--space-2); }
-    .domain-row__actions .btn { width: auto; }
-
-    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center; }
-    .modal-overlay.open { display: flex; }
-    .modal-box { background: var(--color-white); border-radius: var(--radius-2xl); padding: var(--space-6); width: 100%; max-width: 480px; box-shadow: var(--shadow-3); margin: var(--space-4); max-height: 85vh; overflow-y: auto; }
-    .modal-box h3 { font-size: var(--fs-h3); font-weight: 700; margin: 0 0 var(--space-2); }
-    .modal-box p.desc { font-size: var(--fs-body-3); color: var(--text-secondary); margin: 0 0 var(--space-4); }
-    .settings-grid { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-4); }
-    .settings-card { border:1px solid var(--border-secondary); border-radius: var(--radius-xl); padding: var(--space-4); background: linear-gradient(180deg,#fff,#f8fafc); }
-    .settings-card__head { display:flex; align-items:center; justify-content:space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
-    .settings-card__title { font-weight:800; font-size: var(--fs-title-1); }
-    .settings-card__desc { font-size: var(--fs-body-3); color: var(--text-secondary); margin-top: 2px; }
-    .mini-form { display:grid; gap: var(--space-3); margin-top: var(--space-3); }
-    .mini-form .btn { justify-self:flex-start; width:auto; }
-    @media (max-width: 760px) { .settings-grid { grid-template-columns: 1fr; } }
+    .scale-info__hd { display:flex;align-items:center;justify-content:space-between;margin-bottom:14px; }
+    .scale-info__plan { font-size:18px;font-weight:800;color:var(--fill-brand); }
+    .scale-info__price { font-size:24px;font-weight:800; }
+    .scale-info__features { display:grid;grid-template-columns:1fr 1fr;gap:8px; }
+    .scale-info__feat { font-size:13px;color:var(--text-primary);display:flex;align-items:center;gap:6px; }
+    .scale-action { display:flex;gap:10px;margin-top:20px; }
+    .scale-refund { font-size:13px;color:var(--text-secondary);background:var(--color-grey-50);border-radius:8px;padding:10px 14px;margin-top:12px; }
+    .scale-refund strong { color:var(--fill-success); }
+    .upgrade-note { font-size:13px;color:#92400E;background:#FEF3C7;border-radius:8px;padding:10px 14px;margin-top:8px; }
   </style>
 </head>
 <body>
-  <div class="app-shell">
-    <div class="top-bar">
-      <span class="top-bar__brand">wpspot</span>
+<div class="app-shell">
+  <div class="page-header">
+    <div class="page-breadcrumb">
+      <a href="/dashboard.html">대시보드</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <a href="/instance.html">인스턴스</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <span id="instName">인스턴스 상세</span>
     </div>
+  </div>
 
-    <div class="screen">
-      <a class="detail-back" href="/instance.html"></a>
-      <div id="content">
-        <div class="empty">불러오는 중…</div>
+  <!-- 기본 정보 -->
+  <div class="card mb-4" style="margin-bottom:20px;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;">
+      <div>
+        <div style="font-size:20px;font-weight:800;" id="detailName">—</div>
+        <div style="font-size:14px;color:var(--fill-brand);margin-top:4px;" id="detailUrl">—</div>
+        <div style="margin-top:10px;" id="detailBadge"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <a id="wpAdminBtn" href="#" target="_blank" class="btn btn--primary btn--sm">WP 관리자</a>
+        <a id="pmaBtn" href="#" target="_blank" class="btn btn--outline btn--sm">phpMyAdmin</a>
+        <button class="btn btn--outline btn--sm" onclick="restartSite()">재시작</button>
+        <button class="btn btn--danger btn--sm" onclick="deleteSite()">삭제</button>
       </div>
     </div>
   </div>
 
-  <!-- 도메인 추가 모달 -->
-  <div class="modal-overlay" id="domainModal">
-    <div class="modal-box">
-      <h3 id="domainModalTitle">도메인 연결</h3>
-      <p class="desc" id="domainModalDesc"></p>
+  <!-- 탭 -->
+  <div class="tabs">
+    <button class="tab-btn tab-btn--active" onclick="switchTab('overview',this)">개요</button>
+    <button class="tab-btn" onclick="switchTab('scaling',this)">플랜 스케일링</button>
+    <button class="tab-btn" onclick="switchTab('db',this)">데이터베이스</button>
+    <button class="tab-btn" onclick="switchTab('files',this)">파일 관리</button>
+    <button class="tab-btn" onclick="switchTab('logs',this)">로그</button>
+  </div>
+
+  <!-- 개요 탭 -->
+  <div id="tab-overview">
+    <div class="grid-2" style="gap:20px;">
+      <div class="card">
+        <div class="card-title">서버 정보</div>
+        <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px;" id="serverInfo">
+          <div style="display:flex;justify-content:space-between;font-size:14px;padding:8px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--text-secondary);">플랜</span><span id="siPlan" class="font-semibold">—</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:14px;padding:8px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--text-secondary);">PHP 버전</span><span class="font-semibold">PHP 8.3</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:14px;padding:8px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--text-secondary);">웹 서버</span><span class="font-semibold">nginx + PHP-FPM</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:14px;padding:8px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--text-secondary);">데이터베이스</span><span id="siDb" class="font-semibold">MariaDB</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:14px;padding:8px 0;">
+            <span style="color:var(--text-secondary);">캐시</span><span class="font-semibold">Redis 7</span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">보안 & CDN</div>
+        <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px;">
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--fill-success);">✓</span>
+            <span style="font-size:14px;">SSL 인증서 활성화</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--fill-success);">✓</span>
+            <span style="font-size:14px;">WAF (웹방화벽) 활성화</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-secondary);">
+            <span style="color:var(--fill-success);">✓</span>
+            <span style="font-size:14px;">Cloudflare CDN 연결됨</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 0;">
+            <span style="color:var(--fill-success);">✓</span>
+            <span style="font-size:14px;">DDoS 보호 활성화</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 스케일링 탭 -->
+  <div id="tab-scaling" style="display:none;">
+    <div class="card scaling-section">
+      <div class="scaling-label">플랜 스케일링</div>
+      <div class="scaling-sub">슬라이더를 좌우로 이동해 현재 사이트에 맞는 플랜을 선택하세요</div>
+
+      <div class="plan-slider" id="planSlider">
+        <div class="plan-slider__thumb" id="sliderThumb"></div>
+        <div class="plan-opt plan-opt--active" data-idx="0" onclick="movePlan(0)">
+          <div class="plan-opt__name">⚡ 라이트</div>
+          <div class="plan-opt__price">$10/월</div>
+        </div>
+        <div class="plan-opt" data-idx="1" onclick="movePlan(1)">
+          <div class="plan-opt__name">🚀 스탠다드</div>
+          <div class="plan-opt__price">$27/월</div>
+        </div>
+        <div class="plan-opt" data-idx="2" onclick="movePlan(2)">
+          <div class="plan-opt__name">🏆 스마트</div>
+          <div class="plan-opt__price">$42/월</div>
+        </div>
+      </div>
+
+      <div class="scale-info" id="scaleInfo">
+        <!-- JS로 렌더 -->
+      </div>
+    </div>
+  </div>
+
+  <!-- DB 탭 -->
+  <div id="tab-db" style="display:none;">
+    <div class="card">
+      <div class="card-title" style="margin-bottom:16px;">데이터베이스 정보</div>
       <div class="field">
-        <label class="field__label">Cloudflare 도메인</label>
-        <select class="field__select" id="zoneSelect">
-          <option value="">불러오는 중…</option>
+        <label class="field__label">DB 종류</label>
+        <select class="field__select" id="dbTypeSelect">
+          <option value="mariadb">MariaDB (권장)</option>
+          <option value="mysql">MySQL</option>
         </select>
-        <div class="field__help">목록에 없다면 <a href="/domains.html" target="_blank">도메인 관리</a>에서 먼저 추가해주세요.</div>
       </div>
-      <div class="field" id="redirectOptionRow" style="display:none;">
-        <label style="display:flex;align-items:center;gap:8px;font-weight:500;">
-          <input type="checkbox" id="redirectToPrimaryCheck" />
-          Primary 도메인으로 301 리다이렉트
-        </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="field">
+          <label class="field__label">호스트</label>
+          <input class="field__input" value="127.0.0.1" readonly />
+        </div>
+        <div class="field">
+          <label class="field__label">포트</label>
+          <input class="field__input" value="3306" readonly />
+        </div>
+        <div class="field">
+          <label class="field__label">DB 이름</label>
+          <input class="field__input" value="wordpress" readonly />
+        </div>
+        <div class="field">
+          <label class="field__label">사용자</label>
+          <input class="field__input" value="wpuser" readonly />
+        </div>
       </div>
-      <div id="domainModalError" class="field__help is-error hidden"></div>
-      <div class="row" style="margin-top:var(--space-4);justify-content:flex-end;">
-        <button class="btn btn--secondary btn--m" style="width:auto;" onclick="closeDomainModal()">취소</button>
-        <button class="btn btn--primary btn--m" style="width:auto;" id="connectDomainBtn" onclick="connectDomain()">연결하기</button>
-      </div>
+      <button class="btn btn--outline btn--sm" onclick="openPma()">phpMyAdmin 열기</button>
     </div>
   </div>
 
-  <script src="/js/app.js"></script>
-  <script>
-    wpspot.renderShell("instance", "인스턴스 관리");
-    document.querySelector(".detail-back").innerHTML =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg> 인스턴스 목록으로';
+  <!-- 파일 탭 -->
+  <div id="tab-files" style="display:none;">
+    <div class="card">
+      <div class="card-title" style="margin-bottom:16px;">파일 관리</div>
+      <p style="color:var(--text-secondary);font-size:14px;">파일 관리자는 <a href="/file-manager.html" class="text-brand">여기</a>에서 접근하세요.</p>
+    </div>
+  </div>
 
-    const siteId = new URLSearchParams(location.search).get("site");
-    let siteData = null;
-    let credData = null;
-    let domainsCache = [];
-    let activeTab = "overview";
+  <!-- 로그 탭 -->
+  <div id="tab-logs" style="display:none;">
+    <div class="card">
+      <div class="card-title" style="margin-bottom:16px;">최근 로그</div>
+      <div style="background:#111827;color:#e5e7eb;font-family:monospace;font-size:12px;line-height:1.8;padding:16px;border-radius:8px;max-height:320px;overflow-y:auto;">
+        <div style="color:#6ee7b7;">[2026-06-20 16:00:01] nginx: 200 GET /</div>
+        <div style="color:#6ee7b7;">[2026-06-20 15:59:43] nginx: 200 GET /wp-admin/</div>
+        <div style="color:#fbbf24;">[2026-06-20 15:58:12] PHP-FPM: pool www started</div>
+        <div style="color:#6ee7b7;">[2026-06-20 15:57:55] Redis: PONG (connected)</div>
+        <div style="color:#6ee7b7;">[2026-06-20 15:57:00] MariaDB: Connection OK</div>
+      </div>
+    </div>
+  </div>
+</div>
 
-    if (wpspot.requireAuth()) load();
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAuth();
+  wpspot.renderShell('instance', '인스턴스 상세');
 
-    let pollTimer = null;
-    function startPolling() { if (!pollTimer) pollTimer = setInterval(load, 10000); }
-    function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  // 플랜 정보
+  const PLANS = [
+    {
+      key:'light', name:'⚡ 라이트', price:10,
+      features:['CPU 부하 최적화','WAF 기본 제공','Cloudflare CDN','트래픽 무제한','DB 무제한 (MySQL/MariaDB)','SSL 자동 발급','Redis 캐시'],
+    },
+    {
+      key:'standard', name:'🚀 스탠다드', price:27,
+      features:['라이트 플랜 전체 포함','PHP-FPM 서버 기본 2대','서브 PHP 서버 4대 제공','멀티 풀 로드 분산','OPcache 256MB','우선 기술 지원'],
+    },
+    {
+      key:'smart', name:'🏆 스마트', price:42,
+      features:['스탠다드 플랜 전체 포함','PHP-FPM 서버 기본 2대','서브 PHP 서버 8대 제공','자체 로드 밸런싱','OPcache 512MB','전담 기술 매니저','고급 성능 모니터링'],
+    },
+  ];
 
-    async function load() {
-      const content = document.getElementById("content");
-      if (!siteId) { content.innerHTML = `<div class="empty">인스턴스 ID가 없어요.</div>`; return; }
-      try {
-        const [sites, cred, domains] = await Promise.all([
-          wpspot.api("/api/sites"),
-          wpspot.api(`/api/sites/${siteId}/credentials`).catch(() => ({ provisioned: false })),
-          wpspot.api(`/api/sites/${siteId}/domains`).catch(() => ({ domains: [] })),
-        ]);
-        siteData = (sites.sites || []).find(s => s.id === siteId);
-        credData = cred;
-        domainsCache = domains.domains || [];
-        if (!siteData) { content.innerHTML = `<div class="empty">인스턴스를 찾을 수 없어요.</div>`; return; }
+  let currentPlanIdx = 0; // 현재 구독 플랜 인덱스 (API에서 로드)
+  let selectedPlanIdx = 0;
 
-        content.innerHTML = renderPage();
-        if (siteData.status === "provisioning") startPolling(); else stopPolling();
-      } catch (e) {
-        content.innerHTML = `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
-      }
-    }
+  function movePlan(idx) {
+    selectedPlanIdx = idx;
+    const opts = document.querySelectorAll('.plan-opt');
+    const thumb = document.getElementById('sliderThumb');
+    const slider = document.getElementById('planSlider');
+    const sliderW = slider.offsetWidth;
+    const optW = sliderW / 3;
 
-    // ── 데모용 지표 (실 모니터링 연동 전 임시) ──────────────────────────────
-    function seedFrom(str) { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return h; }
-    function metricsFor(site) {
-      if (!site || site.status !== "active") return { cpu: 0, ram: 0, cacheHit: 0, speedMs: null };
-      const seed = seedFrom(site.id);
-      return {
-        cpu: 8 + (seed % 55),
-        ram: 15 + ((seed >> 3) % 60),
-        cacheHit: 55 + ((seed >> 6) % 44),
-        speedMs: 80 + ((seed >> 9) % 340),
-      };
-    }
+    opts.forEach((o, i) => o.classList.toggle('plan-opt--active', i === idx));
+    thumb.style.left = (idx * optW + 4) + 'px';
+    thumb.style.width = (optW - 8) + 'px';
 
-    function renderPage() {
-      const m = metricsFor(siteData);
-      const domain = siteData.custom_domain;
-      return `
-        <div class="detail-header">
-          <div>
-            <div class="detail-title-row">
-              <span class="detail-title">${wpspot.escapeHtml(siteData.site_name)}</span>
-              ${wpspot.statusBadge(siteData.status)}
-            </div>
-            <div class="detail-domain">${domain ? wpspot.escapeHtml(domain) : "도메인이 아직 연결되지 않았어요"}</div>
-          </div>
-          <div class="detail-actions">
-            ${domain ? `<a class="btn btn--secondary btn--m" href="https://${wpspot.escapeHtml(domain)}" target="_blank">사이트 열기 ↗</a>` : ""}
-            <button class="btn btn--secondary btn--m" onclick="purgeCache()" id="purgeBtn" ${!siteData.cf_zone_id ? "disabled" : ""}>캐시 초기화</button>
-            <button class="btn btn--danger btn--m" onclick="deleteInstance()">삭제</button>
-          </div>
-        </div>
+    renderScaleInfo(idx);
+  }
 
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-card__label">CPU 사용량</div>
-            <div class="kpi-card__value">${siteData.status === 'active' ? m.cpu + '%' : '—'}</div>
-            <div class="usage-bar"><div class="usage-bar__track"><div class="usage-bar__fill" style="width:${m.cpu}%;background:${m.cpu >= 80 ? 'var(--color-red-500)' : m.cpu >= 55 ? 'var(--color-orange-500)' : 'var(--color-green-500)'};"></div></div></div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">RAM 사용량</div>
-            <div class="kpi-card__value">${siteData.status === 'active' ? m.ram + '%' : '—'}</div>
-            <div class="usage-bar"><div class="usage-bar__track"><div class="usage-bar__fill" style="width:${m.ram}%;background:${m.ram >= 80 ? 'var(--color-red-500)' : m.ram >= 55 ? 'var(--color-orange-500)' : 'var(--color-green-500)'};"></div></div></div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">캐시 히트율</div>
-            <div class="kpi-card__value">${siteData.status === 'active' ? m.cacheHit + '%' : '—'}</div>
-            <div class="usage-bar"><div class="usage-bar__track"><div class="usage-bar__fill" style="width:${m.cacheHit}%;background:var(--color-blue-500);"></div></div></div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-card__label">평균 응답속도</div>
-            <div class="kpi-card__value">${m.speedMs ? m.speedMs + 'ms' : '—'}</div>
-            <div class="usage-bar"><div class="usage-bar__track"><div class="usage-bar__fill" style="width:${m.speedMs ? Math.min(100, m.speedMs/5) : 0}%;background:var(--color-blue-500);"></div></div></div>
-          </div>
-        </div>
+  function renderScaleInfo(idx) {
+    const plan = PLANS[idx];
+    const isUpgrade = idx > currentPlanIdx;
+    const isDowngrade = idx < currentPlanIdx;
+    const isSame = idx === currentPlanIdx;
 
-        <div class="tabs">
-          ${tabBtn("overview", "개요")}
-          ${tabBtn("caching", "캐싱")}
-          ${tabBtn("database", "데이터베이스")}
-          ${tabBtn("files", "파일 관리자")}
-          ${tabBtn("domains", "도메인")}
-          ${tabBtn("danger", "위험 구역")}
-        </div>
+    // 환불 계산 (다운그레이드 즉시 처리, 남은 일수 기준)
+    const today = new Date();
+    const endOfMonth = new Date(today.getFullYear(), today.getMonth()+1, 0);
+    const remainDays = endOfMonth.getDate() - today.getDate();
+    const daysInMonth = endOfMonth.getDate();
+    const refundAmt = isDowngrade
+      ? ((PLANS[currentPlanIdx].price - plan.price) * remainDays / daysInMonth).toFixed(2)
+      : 0;
 
-        <div class="tab-panel ${activeTab === 'overview' ? 'active' : ''}" data-tab="overview">${renderOverviewTab()}</div>
-        <div class="tab-panel ${activeTab === 'caching' ? 'active' : ''}" data-tab="caching">${renderCachingTab()}</div>
-        <div class="tab-panel ${activeTab === 'database' ? 'active' : ''}" data-tab="database">${renderDatabaseTab()}</div>
-        <div class="tab-panel ${activeTab === 'files' ? 'active' : ''}" data-tab="files">${renderFilesTab()}</div>
-        <div class="tab-panel ${activeTab === 'domains' ? 'active' : ''}" data-tab="domains">${renderDomainsTab()}</div>
-        <div class="tab-panel ${activeTab === 'danger' ? 'active' : ''}" data-tab="danger">${renderDangerTab()}</div>
-      `;
-    }
+    document.getElementById('scaleInfo').innerHTML = `
+      <div class="scale-info__hd">
+        <span class="scale-info__plan">${plan.name}</span>
+        <span class="scale-info__price">$${plan.price}<span style="font-size:14px;font-weight:400;color:var(--text-secondary)">/월</span></span>
+      </div>
+      <div class="scale-info__features">
+        ${plan.features.map(f => `<div class="scale-info__feat"><span style="color:var(--fill-success);">✓</span>${f}</div>`).join('')}
+      </div>
+      ${isDowngrade ? `<div class="scale-refund">⬇ 다운그레이드는 <strong>즉시 처리</strong>되며, 남은 기간 비례 <strong>$${refundAmt} 환불</strong>이 PayPal로 지급됩니다. (${remainDays}일 기준)</div>` : ''}
+      ${isUpgrade ? `<div class="upgrade-note">⬆ 업그레이드는 <strong>다음 달 1일부터 적용</strong>됩니다. 이번 달은 현재 플랜이 유지됩니다.</div>` : ''}
+      ${!isSame ? `
+      <div class="scale-action">
+        <button class="btn ${isDowngrade?'btn--danger':'btn--primary'}" style="flex:1;" onclick="applyScale(${idx})">
+          ${isDowngrade?'⬇ 즉시 다운그레이드':'⬆ 다음 달부터 업그레이드'}
+        </button>
+        <button class="btn btn--outline" onclick="movePlan(${currentPlanIdx})">취소</button>
+      </div>
+      ` : `<div style="text-align:center;color:var(--text-secondary);font-size:14px;margin-top:16px;">현재 사용 중인 플랜입니다.</div>`}
+    `;
+  }
 
-    function tabBtn(key, label) {
-      return `<button class="tab-btn ${activeTab === key ? 'active' : ''}" onclick="switchTab('${key}')">${label}</button>`;
-    }
-    function switchTab(key) {
-      activeTab = key;
-      document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.textContent.trim() === tabLabel(key)));
-      document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === key));
-    }
-    function tabLabel(key) {
-      return { overview: "개요", caching: "캐싱", database: "데이터베이스", files: "파일 관리자", domains: "도메인", danger: "위험 구역" }[key] || key;
-    }
+  function applyScale(idx) {
+    const plan = PLANS[idx];
+    const isDowngrade = idx < currentPlanIdx;
+    if (!confirm(`${plan.name}으로 ${isDowngrade?'다운그레이드':'업그레이드'} 하시겠습니까?`)) return;
+    wpspot.api('/api/sites/'+getSiteId()+'/plan', {method:'PATCH', body:JSON.stringify({plan:plan.key})})
+      .then(() => {
+        wpspot.toast(isDowngrade ? '다운그레이드가 처리되었습니다. 환불이 처리됩니다.' : '업그레이드가 예약되었습니다. 다음 달부터 적용됩니다.', 'success');
+        currentPlanIdx = idx;
+        renderScaleInfo(idx);
+      })
+      .catch(e => wpspot.toast(e.message,'error'));
+  }
 
-    function fv(value) { return `<div class="field-value">${wpspot.escapeHtml(value ?? '—')}</div>`; }
-    function fvLink(url, label) { return `<div class="field-value"><a href="${wpspot.escapeHtml(url)}" target="_blank">${wpspot.escapeHtml(label || url)}</a></div>`; }
+  function getSiteId() {
+    return new URLSearchParams(location.search).get('id') || '';
+  }
 
-    // ── 개요 탭 ──────────────────────────────────────────────────────────
-    function renderOverviewTab() {
-      if (!credData?.provisioned) {
-        return `
-          <div class="card">
-            <div class="title-1">WordPress 준비 중</div>
-            ${siteData.custom_domain
-              ? `<div class="notice-box info" style="margin-top:var(--space-2);">도메인이 연결됐어요. 잠시 후 자동으로 구성이 시작됩니다. 완료되면 관리자 정보가 여기에 표시돼요.</div>`
-              : `<div class="notice-box warn" style="margin-top:var(--space-2);">먼저 "도메인" 탭에서 Primary 도메인을 연결해주세요. 도메인이 연결되면 자동으로 구성이 시작됩니다.</div>`}
-          </div>
-        `;
-      }
-      const wp = credData.wordpress || {};
-      const nginx = credData.nginx || {};
-      const adminUrl = wp.adminUrl;
-      return `
-        <div class="card">
-          <div class="title-1">WordPress 관리자</div>
-          ${adminUrl ? `
-            <div class="field-row" style="margin-top:var(--space-3);">
-              <span class="field-label">관리자 URL</span>
-              ${fvLink(adminUrl, adminUrl)}
-              <a class="btn btn--secondary btn--s" href="${wpspot.escapeHtml(adminUrl)}" target="_blank">열기 ↗</a>
-            </div>` : `<div class="mt-2"></div>`}
-          <div class="field-row">
-            <span class="field-label">아이디</span>
-            ${fv(wp.username)}
-            <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(wp.username || '')}')">복사</button>
-          </div>
-          <div class="field-row">
-            <span class="field-label">비밀번호</span>
-            <div class="field-value secret" id="wpPwField">••••••••</div>
-            <button class="btn btn--secondary btn--s" onclick="togglePw('wpPwField', ${JSON.stringify(wp.password || '')})">보기</button>
-            <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(wp.password || '')}')">복사</button>
-          </div>
-          <div class="notice-box info mt-2">로그인 후 반드시 비밀번호를 변경하세요. 아래 기본 정보 세팅에서 저장된 관리자 정보를 즉시 변경할 수 있어요.</div>
-        </div>
-
-        <div class="card">
-          <div class="title-1">기본 정보 세팅</div>
-          <p class="body-2 mt-2">WordPress 관리자 정보와 데이터베이스 관리 정보를 한 곳에서 업데이트해요.</p>
-          <div class="settings-grid mt-4">
-            <div class="settings-card">
-              <div class="settings-card__head"><div><div class="settings-card__title">WordPress 관리자</div><div class="settings-card__desc">wp-admin 로그인 정보</div></div><span class="badge badge--active">WP</span></div>
-              <div class="mini-form">
-                <div class="field"><label class="field__label">새 관리자 ID</label><input class="field__input" id="wpUsernameInput" value="${wpspot.escapeHtml(wp.username || '')}" /></div>
-                <div class="field"><label class="field__label">새 비밀번호</label><input class="field__input" id="wpPasswordInput" type="password" placeholder="변경할 때만 입력" /></div>
-                <button class="btn btn--primary btn--m" onclick="saveCredentialSettings('wp')">WordPress 정보 저장</button>
-              </div>
-            </div>
-            <div class="settings-card">
-              <div class="settings-card__head"><div><div class="settings-card__title">MySQL/MariaDB phpMyAdmin</div><div class="settings-card__desc">DB 관리 접속 정보</div></div><span class="badge badge--pending">DB</span></div>
-              <div class="mini-form">
-                <div class="field"><label class="field__label">phpMyAdmin ID</label><input class="field__input" id="pmaUsernameInput" value="${wpspot.escapeHtml((credData.pma || {}).username || '')}" /></div>
-                <div class="field"><label class="field__label">phpMyAdmin 비밀번호</label><input class="field__input" id="pmaPasswordInput" type="password" placeholder="변경할 때만 입력" /></div>
-                <button class="btn btn--primary btn--m" onclick="saveCredentialSettings('pma')">phpMyAdmin 정보 저장</button>
-              </div>
-            </div>
-          </div>
-          <div class="notice-box warn mt-3">저장된 정보는 대시보드와 임시 접속 토큰에 즉시 반영됩니다. 이미 실행 중인 원격 WordPress/phpMyAdmin 내부 계정 동기화는 다음 프로비저닝/운영 워크플로우에서 반영되도록 설계돼요.</div>
-        </div>
-
-        <div class="card">
-          <div class="title-1">인프라 구성</div>
-          <div class="field-row" style="margin-top:var(--space-3);">
-            <span class="field-label">GitHub 레포</span>
-            ${siteData.github_repo ? fvLink(`https://github.com/${siteData.github_repo}`, siteData.github_repo) : fv('—')}
-          </div>
-          <div class="field-row">
-            <span class="field-label">실행 엔진</span>
-            ${fv('nginx + PHP-FPM 8.3 + MariaDB/MySQL + Redis 7')}
-          </div>
-          <div class="field-row">
-            <span class="field-label">서버 상태</span>
-            <div class="status-dot-row">
-              <span class="status-dot ${nginx.status === 'ready' || nginx.status === 'active' ? 'status-dot--on' : nginx.status === 'provisioning' ? 'status-dot--warn' : 'status-dot--off'}"></span>
-              ${nginx.status === 'ready' || nginx.status === 'active' ? '실행 중' : nginx.status === 'provisioning' ? '구성 중' : '준비 안됨'}
-            </div>
-          </div>
-          <div class="field-row">
-            <span class="field-label">생성일</span>
-            ${fv(wpspot.formatDate(siteData.created_at))}
-          </div>
-          <div class="notice-box mt-2">서버와 터널은 상시 점검·자동 복구돼요.</div>
-        </div>
-      `;
-    }
-
-    // ── 캐싱 탭 ──────────────────────────────────────────────────────────
-    function renderCachingTab() {
-      const redisOn = !!credData?.redis?.enabled;
-      return `
-        <div class="card">
-          <div class="title-1">Cloudflare 엣지 캐시</div>
-          <p class="body-2 mt-2">전 세계 CDN 엣지에 저장된 정적 캐시예요. 콘텐츠를 변경한 직후에는 초기화해 즉시 반영할 수 있어요.</p>
-          <div class="row" style="margin-top:var(--space-3);">
-            <button class="btn btn--primary btn--m" style="width:auto;" onclick="purgeCache()" id="purgeBtnTab" ${!siteData.cf_zone_id ? "disabled" : ""}>캐시 초기화</button>
-          </div>
-          ${!siteData.cf_zone_id ? `<div class="notice-box warn mt-2">캐시 초기화는 도메인 연결 후 사용할 수 있어요.</div>` : ""}
-        </div>
-
-        <div class="card">
-          <div class="title-1">오브젝트 캐시 (Redis)</div>
-          <div class="status-dot-row mt-2">
-            <span class="status-dot ${redisOn ? 'status-dot--on' : 'status-dot--off'}"></span>
-            ${redisOn ? '활성 — DB 쿼리 결과를 캐시해 응답 속도를 높여요.' : '미사용 (선택 사항)'}
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="title-1">WordPress 페이지 캐시</div>
-          <p class="body-2 mt-2">콘텐츠 발행 시 자동으로 새로 생성돼요. 별도 캐시 플러그인 설치 없이 동작합니다.</p>
-        </div>
-      `;
-    }
-
-    // ── 데이터베이스 탭 ──────────────────────────────────────────────────
-    function renderDatabaseTab() {
-      if (!credData?.provisioned) return `<div class="card"><div class="empty" style="padding:var(--space-6);">구성이 완료되면 표시돼요.</div></div>`;
-      const pma = credData.pma || {};
-      const customDomain = siteData.custom_domain;
-      const pmaDomain = customDomain ? `pma.${customDomain}` : null;
-      const pmaUrl = pma.url || (pmaDomain ? `https://${pmaDomain}` : null);
-      return `
-        <div class="card">
-          <div class="title-1">phpMyAdmin (DB 관리)</div>
-          <p class="body-2 mt-2">WordPress MariaDB/MySQL 데이터베이스를 직접 조회·수정할 수 있어요.</p>
-          ${pmaUrl ? `
-            <div class="field-row" style="margin-top:var(--space-3);">
-              <span class="field-label">접속 주소</span>
-              ${fvLink(pmaUrl, pmaUrl)}
-              <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(pmaUrl)}')">복사</button>
-              <a class="btn btn--primary btn--s" href="${wpspot.escapeHtml(pmaUrl)}" target="_blank">열기 ↗</a>
-            </div>` : `
-            <div class="field-row" style="margin-top:var(--space-3);">
-              <span class="field-label">임시 접속</span>
-              <div class="field-value"><a href="${wpspot.escapeHtml(pma.fallbackUrl || '#')}">/phpmyadmin-lite (토큰 기반)</a></div>
-              <a class="btn btn--secondary btn--s" href="${wpspot.escapeHtml(pma.fallbackUrl || '#')}">열기</a>
-            </div>
-            <div class="notice-box warn mt-2">개인 도메인 연결 시 <code>pma.도메인</code>으로 정식 접속할 수 있어요.</div>`}
-          <div class="field-row" style="margin-top:var(--space-3);">
-            <span class="field-label">비밀번호</span>
-            <div class="field-value secret" id="pmaPwField">••••••••</div>
-            <button class="btn btn--secondary btn--s" onclick="togglePw('pmaPwField', ${JSON.stringify(pma.password || '')})">보기</button>
-            <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(pma.password || '')}')">복사</button>
-          </div>
-          <div class="field-row">
-            <span class="field-label">DB 엔진</span>
-            ${fv(pma.engine || 'MariaDB/MySQL')}
-          </div>
-          <div class="field-row">
-            <span class="field-label">DB 접속</span>
-            ${fv(`${pma.dbUser || 'wpuser'}@${pma.dbHost || '127.0.0.1'}:${pma.dbPort || '3306'}/${pma.dbName || 'wordpress'}`)}
-          </div>
-          <div class="field-row">
-            <span class="field-label">DB 경로</span>
-            ${fv(pma.dbPath || 'wordpress@127.0.0.1:3306')}
-          </div>
-          <div class="notice-box mt-2">직접 URL 접속은 차단돼요. 반드시 <code>pma.도메인</code>으로만 접근할 수 있고, 접속 토큰은 매일 자정(KST) 초기화돼요.</div>
-        </div>
-      `;
-    }
-
-    // ── 파일 관리자 탭 ───────────────────────────────────────────────────
-    function renderFilesTab() {
-      return `
-        <div class="card">
-          <div class="title-1">파일 관리자</div>
-          <p class="body-2 mt-2">테마, 플러그인, 업로드 파일 등을 웹에서 직접 업로드·편집할 수 있어요.</p>
-          <a class="btn btn--primary btn--m mt-2" style="width:auto;" href="/file-manager.html?site=${encodeURIComponent(siteId)}">파일 관리자 열기 ↗</a>
-        </div>
-      `;
-    }
-
-    // ── 도메인 탭 ────────────────────────────────────────────────────────
-    function renderDomainsTab() {
-      return `
-        <div class="card">
-          <div class="section__header" style="margin-bottom:0;">
-            <div class="title-1" style="margin-bottom:0;">연결된 도메인</div>
-            <button class="btn btn--secondary btn--s" onclick="openDomainModal()">+ 도메인 추가</button>
-          </div>
-          <div style="margin-top:var(--space-3);">
-            ${domainsCache.length ? domainsCache.map(domainRowHtml).join("") : `<div class="notice-box warn">아직 연결된 도메인이 없어요. "+ 도메인 추가"로 Primary 도메인을 먼저 연결해주세요.</div>`}
-          </div>
-        </div>
-      `;
-    }
-    function domainRowHtml(d) {
-      const isPrimary = d.role === "primary";
-      return `
-        <div class="domain-row">
-          ${isPrimary ? '<span class="badge badge--active">★ Primary</span>' : '<span class="badge badge--pending">Alias</span>'}
-          <a class="domain-row__host" href="https://${wpspot.escapeHtml(d.hostname)}" target="_blank">${wpspot.escapeHtml(d.hostname)}</a>
-          <div class="domain-row__actions">
-            ${!isPrimary ? `<button class="btn btn--secondary btn--s" onclick="setPrimary('${d.id}','${wpspot.escapeHtml(d.hostname)}')">Primary로 지정</button>` : ""}
-            ${!isPrimary ? `<button class="btn btn--danger btn--s" onclick="deleteDomain('${d.id}','${wpspot.escapeHtml(d.hostname)}')">삭제</button>` : ""}
-          </div>
-        </div>
-      `;
-    }
-
-    // ── 위험 구역 탭 ─────────────────────────────────────────────────────
-    function renderDangerTab() {
-      return `
-        <div class="card" style="border-color:#fecaca;">
-          <div class="title-1" style="color:var(--text-danger);">인스턴스 삭제</div>
-          <p class="body-2 mt-2">이 인스턴스와 연결된 모든 데이터(워드프레스 콘텐츠, 도메인 연결, 저장소)가 영구적으로 삭제돼요. 되돌릴 수 없어요.</p>
-          <button class="btn btn--danger btn--m mt-2" style="width:auto;" onclick="deleteInstance()">이 인스턴스 삭제</button>
-        </div>
-      `;
-    }
-
-    function togglePw(id, pw) {
-      const el = document.getElementById(id);
-      if (el.textContent === "••••••••") {
-        el.textContent = pw || "(없음)";
-        el.classList.remove("secret");
-      } else {
-        el.textContent = "••••••••";
-        el.classList.add("secret");
-      }
-    }
-
-
-    async function saveCredentialSettings(scope) {
-      const body = {};
-      if (scope === "wp") {
-        body.wpUsername = document.getElementById("wpUsernameInput")?.value.trim();
-        body.wpPassword = document.getElementById("wpPasswordInput")?.value;
-      } else {
-        body.pmaUsername = document.getElementById("pmaUsernameInput")?.value.trim();
-        body.pmaPassword = document.getElementById("pmaPasswordInput")?.value;
-      }
-      try {
-        await wpspot.api(`/api/sites/${siteId}/credentials`, { method: "PUT", body: JSON.stringify(body) });
-        wpspot.toast("관리자 정보가 저장됐어요.", "success");
-        activeTab = scope === "wp" ? "overview" : "database";
-        await load();
-      } catch (e) {
-        wpspot.toast(e.message, "error");
-      }
-    }
-
-    async function purgeCache() {
-      if (!siteData?.cf_zone_id) { wpspot.toast("도메인을 먼저 연결해주세요."); return; }
-      try {
-        await wpspot.api(`/api/sites/${siteId}/purge-cache`, { method: "POST" });
-        wpspot.toast("Cloudflare 캐시가 초기화됐어요 ✓", "success");
-      } catch (e) {
-        wpspot.toast(e.message, "error");
-      }
-    }
-
-    async function deleteInstance() {
-      if (!confirm(`'${siteData.site_name}' 인스턴스를 삭제할까요?\n되돌릴 수 없어요.`)) return;
-      try {
-        await wpspot.api(`/api/sites/${siteId}`, { method: "DELETE" });
-        wpspot.toast("삭제됐어요.", "success");
-        location.href = "/instance.html";
-      } catch (e) {
-        wpspot.toast(e.message, "error");
-      }
-    }
-
-    // ── 도메인 추가 모달 ─────────────────────────────────────────────────
-    async function openDomainModal() {
-      document.getElementById("domainModalError").classList.add("hidden");
-      const select = document.getElementById("zoneSelect");
-      select.innerHTML = '<option value="">불러오는 중…</option>';
-      document.getElementById("domainModal").classList.add("open");
-
-      const hasPrimary = domainsCache.some(d => d.role === "primary");
-      document.getElementById("domainModalTitle").textContent = hasPrimary ? "Alias 도메인 추가" : "Primary 도메인 연결";
-      document.getElementById("domainModalDesc").textContent = hasPrimary
-        ? "이 도메인은 같은 인스턴스로 함께 연결돼요. 필요하면 Primary로 301 리다이렉트할 수 있어요."
-        : "Cloudflare에 등록된 도메인을 이 인스턴스의 Primary 도메인으로 연결해요. 연결 즉시 자동으로 구성이 시작됩니다.";
-      document.getElementById("redirectOptionRow").style.display = hasPrimary ? "" : "none";
-      document.getElementById("redirectToPrimaryCheck").checked = false;
-
-      try {
-        const data = await wpspot.api("/api/domains");
-        const zones = (data.zones || []).filter(z => z.status === "active");
-        const used = new Set(domainsCache.map(d => d.hostname));
-        const available = zones.filter(z => !used.has(z.name));
-        select.innerHTML = available.length
-          ? '<option value="">— 선택 —</option>' + available.map(z => `<option value="${wpspot.escapeHtml(z.id)}" data-name="${wpspot.escapeHtml(z.name)}">${wpspot.escapeHtml(z.name)}</option>`).join("")
-          : '<option value="">— 사용 가능한 도메인 없음 —</option>';
-      } catch (e) {
-        select.innerHTML = `<option value="">${wpspot.escapeHtml(e.message)}</option>`;
-      }
-    }
-    function closeDomainModal() { document.getElementById("domainModal").classList.remove("open"); }
-
-    async function connectDomain() {
-      const select = document.getElementById("zoneSelect");
-      const zoneId = select.value;
-      const hostname = select.options[select.selectedIndex]?.dataset?.name || "";
-      const errEl = document.getElementById("domainModalError");
-      errEl.classList.add("hidden");
-      if (!zoneId) { errEl.textContent = "도메인을 선택해주세요."; errEl.classList.remove("hidden"); return; }
-
-      const btn = document.getElementById("connectDomainBtn");
-      btn.disabled = true; btn.textContent = "연결 중…";
-      try {
-        const hasPrimary = domainsCache.some(d => d.role === "primary");
-        const redirectToPrimary = hasPrimary && document.getElementById("redirectToPrimaryCheck").checked;
-        await wpspot.api(`/api/sites/${siteId}/domains`, {
-          method: "POST",
-          body: JSON.stringify({ hostname, zoneId, role: hasPrimary ? "alias" : "primary", redirectToPrimary }),
-        });
-        closeDomainModal();
-        wpspot.toast(hasPrimary ? `${hostname} 도메인이 연결됐어요 ✓` : `${hostname} 연결 완료! 구성을 시작했어요 (~3~5분 소요)`, "success");
-        load();
-      } catch (e) {
-        errEl.textContent = e.message;
-        errEl.classList.remove("hidden");
-      } finally {
-        btn.disabled = false; btn.textContent = "연결하기";
-      }
-    }
-    async function setPrimary(bindingId, hostname) {
-      if (!confirm(`'${hostname}'을 Primary 도메인으로 지정할까요?\n기존 Primary는 Alias로 변경돼요.`)) return;
-      try {
-        await wpspot.api(`/api/sites/${siteId}/domains/${bindingId}/primary`, { method: "PUT" });
-        wpspot.toast(`${hostname}이 Primary로 지정됐어요 ✓`, "success");
-        load();
-      } catch (e) {
-        wpspot.toast(e.message, "error");
-      }
-    }
-    async function deleteDomain(bindingId, hostname) {
-      if (!confirm(`'${hostname}' 도메인 연결을 삭제할까요?`)) return;
-      try {
-        await wpspot.api(`/api/sites/${siteId}/domains/${bindingId}`, { method: "DELETE" });
-        wpspot.toast("삭제됐어요.", "success");
-        load();
-      } catch (e) {
-        wpspot.toast(e.message, "error");
-      }
-    }
-    document.getElementById("domainModal").addEventListener("click", e => {
-      if (e.target === document.getElementById("domainModal")) closeDomainModal();
+  function switchTab(tab, btn) {
+    ['overview','scaling','db','files','logs'].forEach(t => {
+      document.getElementById('tab-'+t).style.display = t===tab ? 'block' : 'none';
     });
-  </script>
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-btn--active'));
+    btn.classList.add('tab-btn--active');
+    if (tab === 'scaling') setTimeout(() => movePlan(selectedPlanIdx), 50);
+  }
+
+  function restartSite() {
+    if (!confirm('사이트를 재시작하겠습니까?')) return;
+    wpspot.api('/api/sites/'+getSiteId()+'/restart', {method:'POST'})
+      .then(() => wpspot.toast('재시작 요청이 처리되었습니다.','success'))
+      .catch(e => wpspot.toast(e.message,'error'));
+  }
+
+  function deleteSite() {
+    if (!confirm('정말 삭제하겠습니까? 이 작업은 되돌릴 수 없습니다.')) return;
+    wpspot.api('/api/sites/'+getSiteId(), {method:'DELETE'})
+      .then(() => { wpspot.toast('삭제되었습니다.','success'); setTimeout(() => location.href='/instance.html', 800); })
+      .catch(e => wpspot.toast(e.message,'error'));
+  }
+
+  function openPma() { window.open('/phpmyadmin-lite.html?id='+getSiteId(), '_blank'); }
+
+  // 초기 로드
+  const siteId = getSiteId();
+  if (siteId) {
+    wpspot.api('/api/sites/'+siteId).then(site => {
+      document.getElementById('instName').textContent = site.displayName || site.slug;
+      document.getElementById('detailName').textContent = site.displayName || site.slug;
+      document.getElementById('detailUrl').textContent = site.siteUrl || '—';
+      document.getElementById('detailBadge').innerHTML = wpspot.statusBadge(site.status);
+      document.getElementById('wpAdminBtn').href = (site.siteUrl || '#') + '/wp-admin/';
+      document.getElementById('pmaBtn').href = site.pmaUrl || '#';
+      document.getElementById('siPlan').textContent = {light:'라이트',standard:'스탠다드',smart:'스마트'}[site.plan] || '—';
+      currentPlanIdx = ['light','standard','smart'].indexOf(site.plan);
+      if (currentPlanIdx < 0) currentPlanIdx = 0;
+      selectedPlanIdx = currentPlanIdx;
+    }).catch(() => {});
+  }
+
+  // 슬라이더 초기화
+  setTimeout(() => movePlan(0), 100);
+</script>
 </body>
 </html>
