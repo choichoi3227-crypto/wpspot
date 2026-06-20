@@ -531,6 +531,23 @@ jobs:
           sudo cp /tmp/cloudflared-pkg/usr/bin/cloudflared /usr/local/bin/cloudflared
           cloudflared --version
 
+      # 중간 진행 상태 콜백 — DNS/DB/터널 세팅 단계로 진입했음을 알려서
+      # 대시보드가 "서버 생성 중(GitHub Actions)" → "서버 세팅 중(DNS/DB)"으로 배지를 갱신할 수 있게 한다.
+      - name: wpspot 콜백 (세팅 중)
+        run: |
+          CALLBACK="${{ inputs.wpspot_callback_url }}"
+          SITE_ID="${{ inputs.wpspot_site_id }}"
+          JWT="${{ inputs.wpspot_jwt }}"
+          if [ -z "$CALLBACK" ] || [ -z "$SITE_ID" ] || [ -z "$JWT" ]; then
+            echo "콜백 정보 없음 — 건너뜀"
+            exit 0
+          fi
+          curl -sf -X POST "$CALLBACK" \
+            -H "Authorization: Bearer ${JWT}" \
+            -H "Content-Type: application/json" \
+            -d "{\"siteId\":\"${SITE_ID}\",\"status\":\"setting_up\"}" \
+            || echo "::warning::중간 콜백 실패(무시하고 계속 진행)"
+
       - name: Named Tunnel 생성 (WP + PMA)
         env:
           CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
@@ -543,54 +560,82 @@ jobs:
           fi
           echo "CF_CREDS_OK=true" >> $GITHUB_ENV
 
+          # 터널을 생성(또는 기존 것을 재사용)하고 ID/TOKEN을 각각 한 줄씩 stdout에 출력한다.
+          # (이전 버전은 "${ID}|${TOKEN}"을 한 줄로 합쳐 "%|*" / "#*|"로 분리했는데,
+          #  와일드카드가 누락되는 등의 셸 파싱 실수가 한 번이라도 섞이면 ID/TOKEN이 뒤섞여
+          #  버려서 이후 모든 단계가 실패했다. 줄 단위로 분리해 그 문제를 원천적으로 없앤다.)
           create_or_get_tunnel() {
             local NAME="$1"
             local RESP ID TOKEN
+
             RESP=$(curl -s -X POST \
               "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel" \
               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
               -H "Content-Type: application/json" \
               -d "{\"name\":\"${NAME}\",\"tunnel_secret\":\"$(openssl rand -base64 32)\"}")
             ID=$(echo "$RESP" | python3 -c \
-              "import sys,json; d=json.load(sys.stdin); print(d['result']['id'])" 2>/dev/null || echo "")
+              "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('id') or '')" 2>/dev/null)
+
             if [ -z "$ID" ]; then
               RESP=$(curl -s \
                 "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?name=${NAME}&is_deleted=false" \
                 -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
               ID=$(echo "$RESP" | python3 -c \
-                "import sys,json; d=json.load(sys.stdin); print(d['result'][0]['id'])" 2>/dev/null || echo "")
+                "import sys,json; r=json.load(sys.stdin).get('result') or []; print(r[0]['id'] if r else '')" 2>/dev/null)
             fi
-            [ -z "$ID" ] && { echo "::error::Tunnel 생성 실패: $NAME"; exit 1; }
+            if [ -z "$ID" ]; then
+              echo "::error::Tunnel 생성 실패: $NAME — 응답: $(echo "$RESP" | head -c 300)"
+              return 1
+            fi
+
             TOKEN=$(curl -s \
               "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${ID}/token" \
               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['result'])" 2>/dev/null)
-            [ -z "$TOKEN" ] && { echo "::error::Tunnel Token 실패: $NAME"; exit 1; }
-            echo "${ID}|${TOKEN}"
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('result') or '')" 2>/dev/null)
+            if [ -z "$TOKEN" ]; then
+              echo "::error::Tunnel Token 조회 실패: $NAME"
+              return 1
+            fi
+
+            printf '%s\n%s\n' "$ID" "$TOKEN"
           }
-          
-          WP_R=$(create_or_get_tunnel "wpspot-${{ inputs.site_slug }}-wp")
-          WP_TUNNEL_ID="${WP_R%|*}"; WP_TUNNEL_TOKEN="${WP_R#*|}"
-          PMA_R=$(create_or_get_tunnel "wpspot-${{ inputs.site_slug }}-pma")
-          PMA_TUNNEL_ID="${PMA_R%|*}"; PMA_TUNNEL_TOKEN="${PMA_R#*|}"
-          
-          echo "WP_TUNNEL_ID=${WP_TUNNEL_ID}"       >> $GITHUB_ENV
-          echo "WP_TUNNEL_TOKEN=${WP_TUNNEL_TOKEN}"  >> $GITHUB_ENV
+
+          WP_OUT=$(create_or_get_tunnel "wpspot-${{ inputs.site_slug }}-wp") || {
+            echo "::error::WP 터널 생성 실패 — 프로비저닝 중단"
+            echo "CF_CREDS_OK=false" >> $GITHUB_ENV
+            exit 1
+          }
+          WP_TUNNEL_ID=$(echo "$WP_OUT" | sed -n '1p')
+          WP_TUNNEL_TOKEN=$(echo "$WP_OUT" | sed -n '2p')
+
+          PMA_OUT=$(create_or_get_tunnel "wpspot-${{ inputs.site_slug }}-pma") || {
+            echo "::error::PMA 터널 생성 실패 — 프로비저닝 중단"
+            echo "CF_CREDS_OK=false" >> $GITHUB_ENV
+            exit 1
+          }
+          PMA_TUNNEL_ID=$(echo "$PMA_OUT" | sed -n '1p')
+          PMA_TUNNEL_TOKEN=$(echo "$PMA_OUT" | sed -n '2p')
+
+          echo "::add-mask::${WP_TUNNEL_TOKEN}"
+          echo "::add-mask::${PMA_TUNNEL_TOKEN}"
+
+          echo "WP_TUNNEL_ID=${WP_TUNNEL_ID}"        >> $GITHUB_ENV
+          echo "WP_TUNNEL_TOKEN=${WP_TUNNEL_TOKEN}"   >> $GITHUB_ENV
           echo "WP_TUNNEL_HOST=${WP_TUNNEL_ID}.cfargotunnel.com" >> $GITHUB_ENV
-          echo "PMA_TUNNEL_ID=${PMA_TUNNEL_ID}"      >> $GITHUB_ENV
+          echo "PMA_TUNNEL_ID=${PMA_TUNNEL_ID}"       >> $GITHUB_ENV
           echo "PMA_TUNNEL_TOKEN=${PMA_TUNNEL_TOKEN}" >> $GITHUB_ENV
           echo "PMA_TUNNEL_HOST=${PMA_TUNNEL_ID}.cfargotunnel.com" >> $GITHUB_ENV
-          
-          # tunnel-config.json 업데이트
+
           python3 -c "
           import json
           cfg = json.load(open('deploy/tunnel-config.json'))
-          cfg['wp_tunnel_id']   = '${WP_TUNNEL_ID}'
-          cfg['wp_tunnel_host'] = '${WP_TUNNEL_ID}.cfargotunnel.com'
-          cfg['pma_tunnel_id']  = '${PMA_TUNNEL_ID}'
-          cfg['pma_tunnel_host']= '${PMA_TUNNEL_ID}.cfargotunnel.com'
+          cfg['wp_tunnel_id']    = '${WP_TUNNEL_ID}'
+          cfg['wp_tunnel_host']  = '${WP_TUNNEL_ID}.cfargotunnel.com'
+          cfg['pma_tunnel_id']   = '${PMA_TUNNEL_ID}'
+          cfg['pma_tunnel_host'] = '${PMA_TUNNEL_ID}.cfargotunnel.com'
           open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
           "
+          echo "✓ Named Tunnel 생성 완료 (WP: ${WP_TUNNEL_ID}, PMA: ${PMA_TUNNEL_ID})"
 
       - name: Named Tunnel 연결 (WP → nginx:8080)
         run: |
@@ -629,52 +674,23 @@ jobs:
       # ────────────────────────────────────────────────
       # STEP 9: Cloudflare Worker 배포 + DNS/도메인
       # ────────────────────────────────────────────────
-      - name: Cloudflare Worker 배포 + 커스텀 도메인 등록
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
+      - name: Worker 코드/설정 파일 생성
+        if: env.CF_CREDS_OK == 'true'
         run: |
-          [ "${CF_CREDS_OK}" != "true" ] && { echo "건너뜀"; exit 0; }
-          npm install -g wrangler --quiet --no-progress 2>/dev/null
+          mkdir -p /tmp/cf-worker-src
 
-          deploy_worker() {
-            local NAME="$1" TUNNEL_HOST="$2"
-            local WORKDIR="/tmp/cf-${NAME}"
-            mkdir -p "$WORKDIR"
-            python3 - << PYEOF
-          js = r"""export default {
+          cat > /tmp/cf-worker-src/worker.js << 'EOF'
+          // wpspot Edge Worker — 모든 요청을 TrafficGovernor(Durable Object)로 위임한다.
+          // Durable Object가 동시 처리 수를 PHP-FPM 풀 용량에 맞춰 제한하고,
+          // 캐시 가능한 GET 응답을 짧게 캐싱해 origin(터널 너머의 nginx) 과부하를 막는다.
+          export default {
             async fetch(request, env) {
-              const origin = env.TUNNEL_ORIGIN;
-              if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
-              const url = new URL(request.url);
-              const t = new URL(origin);
-              t.pathname = url.pathname; t.search = url.search;
-              const h = new Headers(request.headers);
-              h.set('host', new URL(origin).host);
-              h.set('x-forwarded-proto','https');
-              h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
-              try {
-                const r = await fetch(t.toString(), {
-                  method: request.method, headers: h,
-                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
-                  redirect: 'manual'
-                });
-                const out = new Headers(r.headers);
-                out.set('x-powered-by','wpspot/nginx+php-fpm');
-                return new Response(r.body, {status:r.status, headers:out});
-              } catch(e) {
-                return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
-              }
-            }
-          };
               const id = env.GOVERNOR.idFromName('main');
               return env.GOVERNOR.get(id).fetch(request);
             }
           };
 
           // TrafficGovernor — 사이트당 1개 인스턴스(SQLite 기반 Durable Object, 무료 플랜 호환)
-          // - 동시 처리 수를 PHP-FPM 풀 용량(www 10 + www2 10)에 맞춰 제한 → origin 과부하 방지(트래픽 스무딩)
-          // - 쿠키 없는 GET 응답을 짧게 캐시 → 동일 페이지 반복 요청을 origin까지 보내지 않음(작업 처리 효율화)
           export class TrafficGovernor {
             constructor(ctx, env) {
               this.env = env;
@@ -682,8 +698,16 @@ jobs:
               this.maxConcurrent = 18;
               this.cache = new Map();
             }
+
             async fetch(request) {
               const origin = this.env.TUNNEL_ORIGIN;
+              if (!origin) {
+                return new Response(offlinePage(), {
+                  status: 503,
+                  headers: { 'Content-Type': 'text/html;charset=utf-8', 'Retry-After': '30' },
+                });
+              }
+
               const url = new URL(request.url);
               const method = request.method;
               const cacheKey = url.pathname + url.search;
@@ -693,233 +717,312 @@ jobs:
               if (cacheable) {
                 const hit = this.cache.get(cacheKey);
                 if (hit && hit.expires > Date.now()) {
-                  return new Response(hit.body, {status:hit.status, headers:{...hit.headers,'x-wpspot-cache':'HIT'}});
+                  return new Response(hit.body, {
+                    status: hit.status,
+                    headers: { ...hit.headers, 'x-wpspot-cache': 'HIT' },
+                  });
                 }
               }
 
               if (this.inFlight >= this.maxConcurrent) {
                 await new Promise(r => setTimeout(r, 150 + Math.floor(Math.random() * 250)));
                 if (this.inFlight >= this.maxConcurrent) {
-                  return new Response(busy(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'2'}});
+                  return new Response(busyPage(), {
+                    status: 503,
+                    headers: { 'Content-Type': 'text/html;charset=utf-8', 'Retry-After': '2' },
+                  });
                 }
               }
 
               this.inFlight++;
               try {
                 const t = new URL(origin);
-                t.pathname = url.pathname; t.search = url.search;
+                t.pathname = url.pathname;
+                t.search = url.search;
                 const h = new Headers(request.headers);
                 h.set('host', t.host);
-                h.set('x-forwarded-proto','https');
+                h.set('x-forwarded-proto', 'https');
                 h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
+
                 const r = await fetch(t.toString(), {
-                  method, headers: h,
-                  body: ['GET','HEAD'].includes(method) ? undefined : request.body,
-                  redirect: 'manual'
+                  method,
+                  headers: h,
+                  body: ['GET', 'HEAD'].includes(method) ? undefined : request.body,
+                  redirect: 'manual',
                 });
 
                 if (cacheable && r.status === 200) {
                   const body = await r.clone().text();
                   const headers = {};
-                  r.headers.forEach((v,k) => { if (k !== 'set-cookie') headers[k] = v; });
-                  this.cache.set(cacheKey, {body, status:r.status, headers, expires: Date.now() + 5000});
+                  r.headers.forEach((v, k) => { if (k !== 'set-cookie') headers[k] = v; });
+                  this.cache.set(cacheKey, { body, status: r.status, headers, expires: Date.now() + 5000 });
                   if (this.cache.size > 200) this.cache.delete(this.cache.keys().next().value);
                 }
 
                 const out = new Headers(r.headers);
-                out.set('x-powered-by','wpspot/nginx+php-fpm');
-                out.set('x-wpspot-cache','MISS');
-                return new Response(r.body, {status:r.status, headers:out});
-              } catch(e) {
-                return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+                out.set('x-powered-by', 'wpspot/nginx+php-fpm');
+                out.set('x-wpspot-cache', 'MISS');
+                return new Response(r.body, { status: r.status, headers: out });
+              } catch (e) {
+                return new Response(offlinePage(e.message), {
+                  status: 503,
+                  headers: { 'Content-Type': 'text/html;charset=utf-8', 'Retry-After': '30' },
+                });
               } finally {
                 this.inFlight--;
               }
             }
           }
 
-          function offline(m=''){
+          function offlinePage(m = '') {
             return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="30"><title>잠시 후 이용 가능해요</title>'
-              +'<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
-              +'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
-              +'.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
-              +'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}'
-              +'.dot{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:8px;animation:pulse 1.5s infinite}'
-              +'@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style></head>'
-              +'<body><div class="box"><div><span class="dot"></span></div><h2>서버 준비 중이에요</h2>'
-              +'<p>30초 후 자동으로 새로고침됩니다.</p>'
-              +(m?'<p style="font-size:.75rem;color:#94a3b8;margin-top:12px">'+m+'</p>':'')+'</div></body></html>';
+              + '<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+              + 'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
+              + '.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
+              + 'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}'
+              + '.dot{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:8px;animation:pulse 1.5s infinite}'
+              + '@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style></head>'
+              + '<body><div class="box"><div><span class="dot"></span></div><h2>서버 준비 중이에요</h2>'
+              + '<p>30초 후 자동으로 새로고침됩니다.</p>'
+              + (m ? '<p style="font-size:.75rem;color:#94a3b8;margin-top:12px">' + m + '</p>' : '') + '</div></body></html>';
           }
 
-          function busy(){
+          function busyPage() {
             return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>접속이 많아요</title>'
-              +'<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
-              +'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
-              +'.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
-              +'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}</style></head>'
-              +'<body><div class="box"><h2>접속이 많아 잠시 대기 중이에요</h2><p>곧바로 다시 시도해 주세요.</p></div></body></html>';
-          }"""
-          open('${WORKDIR}/worker.js','w').write(js)
-          PYEOF
-            python3 -c "
-          name='${NAME}'; host='${TUNNEL_HOST}'
-          toml='name=\"'+name+'\"\nmain=\"worker.js\"\ncompatibility_date=\"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN=\"https://'+host+'\"\n'
-          toml = ('name=\"'+name+'\"\n'
-                  'main=\"worker.js\"\n'
-                  'compatibility_date=\"2024-09-23\"\n'
-                  '[vars]\n'
-                  'TUNNEL_ORIGIN=\"https://'+host+'\"\n'
-                  '\n'
-                  '[[durable_objects.bindings]]\n'
-                  'name=\"GOVERNOR\"\n'
-                  'class_name=\"TrafficGovernor\"\n'
-                  '\n'
-                  '[[migrations]]\n'
-                  'tag=\"v1\"\n'
-                  'new_sqlite_classes=[\"TrafficGovernor\"]\n')
-          open('${WORKDIR}/wrangler.toml','w').write(toml)
-          "
-            cd "$WORKDIR" && wrangler deploy --minify
-            echo "✓ Worker 배포 (TrafficGovernor DO 연동): ${NAME}"
+              + '<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+              + 'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
+              + '.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
+              + 'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}</style></head>'
+              + '<body><div class="box"><h2>접속이 많아 잠시 대기 중이에요</h2><p>곧바로 다시 시도해 주세요.</p></div></body></html>';
+          }
+          EOF
+          echo "✓ worker.js 생성 완료 ($(wc -l < /tmp/cf-worker-src/worker.js) 줄)"
+
+      - name: Cloudflare Worker 배포 (WP + PMA)
+        if: env.CF_CREDS_OK == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.secret_cf_account_id }}
+        run: |
+          npm install -g wrangler --quiet --no-progress 2>/dev/null
+
+          deploy_worker() {
+            local NAME="$1" TUNNEL_HOST="$2"
+            local WORKDIR="/tmp/cf-${NAME}"
+            mkdir -p "$WORKDIR"
+            cp /tmp/cf-worker-src/worker.js "${WORKDIR}/worker.js"
+
+            cat > "${WORKDIR}/wrangler.toml" << TOMLEOF
+          name = "${NAME}"
+          main = "worker.js"
+          compatibility_date = "2024-09-23"
+
+          [vars]
+          TUNNEL_ORIGIN = "https://${TUNNEL_HOST}"
+
+          [[durable_objects.bindings]]
+          name = "GOVERNOR"
+          class_name = "TrafficGovernor"
+
+          [[migrations]]
+          tag = "v1"
+          new_sqlite_classes = ["TrafficGovernor"]
+          TOMLEOF
+
+            (cd "$WORKDIR" && wrangler deploy --minify) || {
+              echo "::error::Worker 배포 실패: ${NAME}"
+              return 1
+            }
+            echo "✓ Worker 배포 완료 (TrafficGovernor DO 연동): ${NAME}"
           }
 
-          deploy_worker "$WORKER_NAME"  "$WP_TUNNEL_HOST"
-          deploy_worker "$PMA_WORKER"   "$PMA_TUNNEL_HOST"
+          deploy_worker "$WORKER_NAME" "$WP_TUNNEL_HOST"  || echo "WORKER_DEPLOY_FAILED=wp"  >> $GITHUB_ENV
+          deploy_worker "$PMA_WORKER"  "$PMA_TUNNEL_HOST" || echo "WORKER_DEPLOY_FAILED=pma" >> $GITHUB_ENV
 
-          WORKER_URL="https://${WORKER_NAME}.${{ inputs.secret_cf_account_id }}.workers.dev"
+          WORKER_SUBDOMAIN=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('subdomain') or '')" 2>/dev/null)
+          [ -z "$WORKER_SUBDOMAIN" ] && WORKER_SUBDOMAIN="${CLOUDFLARE_ACCOUNT_ID}"
+
+          WORKER_URL="https://${WORKER_NAME}.${WORKER_SUBDOMAIN}.workers.dev"
+          PMA_WORKER_URL="https://${PMA_WORKER}.${WORKER_SUBDOMAIN}.workers.dev"
           FINAL_URL="${{ inputs.custom_domain }}"
           FINAL_URL="${FINAL_URL:+https://${FINAL_URL}}"
           FINAL_URL="${FINAL_URL:-${WORKER_URL}}"
-          echo "WORKER_URL=${WORKER_URL}" >> $GITHUB_ENV
-          echo "FINAL_SITE_URL=${FINAL_URL}" >> $GITHUB_ENV
 
-          # tunnel-config.json 업데이트
+          echo "WORKER_URL=${WORKER_URL}"         >> $GITHUB_ENV
+          echo "PMA_WORKER_URL=${PMA_WORKER_URL}" >> $GITHUB_ENV
+          echo "FINAL_SITE_URL=${FINAL_URL}"      >> $GITHUB_ENV
+          echo "WORKER_SUBDOMAIN=${WORKER_SUBDOMAIN}" >> $GITHUB_ENV
+
           python3 -c "
           import json
           cfg = json.load(open('deploy/tunnel-config.json'))
-          cfg['worker_url']      = '${WORKER_URL}'
-          cfg['final_site_url']  = '${FINAL_URL}'
-          cfg['pma_worker_url']  = 'https://${{ inputs.secret_cf_account_id }}.workers.dev/${PMA_WORKER}'
+          cfg['worker_url']     = '${WORKER_URL}'
+          cfg['final_site_url'] = '${FINAL_URL}'
+          cfg['pma_worker_url'] = '${PMA_WORKER_URL}'
           open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
           "
 
-          # 커스텀 도메인 자동 등록
+      - name: 커스텀 도메인 DNS 등록 (CNAME)
+        if: env.CF_CREDS_OK == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ inputs.secret_cf_api_token }}
+        run: |
+          # 도메인을 workers.dev 호스트로 향하는 CNAME(proxied)으로 등록한다.
+          # (예전 버전은 A 레코드를 만드는 경로가 따로 있어 "CNAME이어야 하는데 A 레코드가
+          #  생긴다"는 문제가 있었음 — 이 워크플로우는 항상 CNAME만 사용한다.)
           register_domain() {
-            local DOMAIN="$1" WORKER="$2"
-            [ -z "$DOMAIN" ] && return
-            ZONE_ID=$(curl -s \
-              "https://api.cloudflare.com/client/v4/zones?name=$(echo $DOMAIN | awk -F. '{print $(NF-1)"."$NF}')" \
+            local DOMAIN="$1" TARGET_HOST="$2"
+            [ -z "$DOMAIN" ] && return 0
+
+            local ROOT
+            ROOT=$(echo "$DOMAIN" | awk -F. '{print $(NF-1)"."$NF}')
+            local ZONE_ID
+            ZONE_ID=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=${ROOT}" \
               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              | python3 -c "import sys,json; r=json.load(sys.stdin)['result']; print(r[0]['id'] if r else '')" 2>/dev/null || echo "")
-            [ -z "$ZONE_ID" ] && {
-              echo "::warning::Zone 없음 (${DOMAIN}) — 수동 CNAME 필요: ${DOMAIN} → ${WORKER}.${{ inputs.secret_cf_account_id }}.workers.dev"
-              return
-            }
-            # CNAME 등록/업데이트
-            DNS=$(curl -s -X POST \
-              "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"type\":\"CNAME\",\"name\":\"${DOMAIN}\",\"content\":\"${WORKER}.${{ inputs.secret_cf_account_id }}.workers.dev\",\"proxied\":true,\"ttl\":1}")
-            DNS_OK=$(echo "$DNS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',False))" 2>/dev/null)
-            if [ "$DNS_OK" != "True" ]; then
-              REC_ID=$(curl -s \
-                "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?name=${DOMAIN}&type=CNAME" \
-                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-                | python3 -c "import sys,json; r=json.load(sys.stdin)['result']; print(r[0]['id'] if r else '')" 2>/dev/null)
-              [ -n "$REC_ID" ] && curl -s -X PUT \
-                "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${REC_ID}" \
-                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-                -H "Content-Type: application/json" \
-                -d "{\"type\":\"CNAME\",\"name\":\"${DOMAIN}\",\"content\":\"${WORKER}.${{ inputs.secret_cf_account_id }}.workers.dev\",\"proxied\":true,\"ttl\":1}" > /dev/null
+              | python3 -c "import sys,json; r=json.load(sys.stdin).get('result') or []; print(r[0]['id'] if r else '')" 2>/dev/null)
+
+            if [ -z "$ZONE_ID" ]; then
+              echo "::warning::Zone 없음 (${DOMAIN}) — 수동 CNAME 필요: ${DOMAIN} → ${TARGET_HOST}"
+              return 0
             fi
-            # Worker 도메인 바인딩
-            curl -s -X PUT \
-              "https://api.cloudflare.com/client/v4/accounts/${{ inputs.secret_cf_account_id }}/workers/scripts/${WORKER}/domains" \
+
+            local EXISTING_ID EXISTING_TYPE
+            EXISTING_ID=$(curl -s "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?name=${DOMAIN}" \
               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
+              | python3 -c "import sys,json; r=json.load(sys.stdin).get('result') or []; print(r[0]['id'] if r else '')" 2>/dev/null)
+            EXISTING_TYPE=$(curl -s "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?name=${DOMAIN}" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              | python3 -c "import sys,json; r=json.load(sys.stdin).get('result') or []; print(r[0]['type'] if r else '')" 2>/dev/null)
+
+            if [ -n "$EXISTING_ID" ] && [ "$EXISTING_TYPE" != "CNAME" ]; then
+              # A 레코드 등 다른 타입이 이미 있으면 삭제 후 CNAME으로 재생성 (타입 변경은 PATCH로 안 되는 계정이 있음)
+              curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${EXISTING_ID}" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" > /dev/null
+              EXISTING_ID=""
+            fi
+
+            local PAYLOAD="{\"type\":\"CNAME\",\"name\":\"${DOMAIN}\",\"content\":\"${TARGET_HOST}\",\"proxied\":true,\"ttl\":1}"
+            if [ -n "$EXISTING_ID" ]; then
+              curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${EXISTING_ID}" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" \
+                -d "$PAYLOAD" > /dev/null
+            else
+              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" \
+                -d "$PAYLOAD" > /dev/null
+            fi
+
+            # Worker Custom Domain 바인딩 (workers.dev 서브도메인이 아니라 사용자 도메인으로도 직접 받게)
+            local WORKER_SCRIPT="${3:-$WORKER_NAME}"
+            curl -s -X PUT \
+              "https://api.cloudflare.com/client/v4/accounts/${{ inputs.secret_cf_account_id }}/workers/scripts/${WORKER_SCRIPT}/domains" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" \
               -d "{\"domains\":[{\"zone_id\":\"${ZONE_ID}\",\"hostname\":\"${DOMAIN}\"}]}" > /dev/null
-            echo "✓ 도메인 등록: ${DOMAIN} → ${WORKER}"
+
+            echo "✓ CNAME 등록: ${DOMAIN} → ${TARGET_HOST}"
           }
-          
-          register_domain "${{ inputs.custom_domain }}" "$WORKER_NAME"
-          register_domain "${{ inputs.pma_domain }}"    "$PMA_WORKER"
 
           CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
-          [ -n "$CUSTOM_DOMAIN" ] && register_domain "www.${CUSTOM_DOMAIN}" "$WORKER_NAME"
-          
-                # ────────────────────────────────────────────────
-                # STEP 10: GitHub Secrets 등록
-                # ────────────────────────────────────────────────
-                - name: GitHub Secrets 등록
-                  env:
+          PMA_DOMAIN="${{ inputs.pma_domain }}"
+
+          register_domain "$CUSTOM_DOMAIN" "${WORKER_NAME}.${WORKER_SUBDOMAIN}.workers.dev" "$WORKER_NAME"
+          [ -n "$CUSTOM_DOMAIN" ] && register_domain "www.${CUSTOM_DOMAIN}" "${WORKER_NAME}.${WORKER_SUBDOMAIN}.workers.dev" "$WORKER_NAME"
+          register_domain "$PMA_DOMAIN" "${PMA_WORKER}.${WORKER_SUBDOMAIN}.workers.dev" "$PMA_WORKER"
+
+      # ────────────────────────────────────────────────
+      # STEP 10: GitHub Secrets 등록
+      # ────────────────────────────────────────────────
+      - name: GitHub Secrets 등록
+        env:
           GH_PAT: ${{ inputs.secret_github_token }}
-                  run: |
+        run: |
           REPO="${{ github.repository }}"
-          [ -z "$GH_PAT" ] && { echo "PAT 없음 — 건너뜀"; exit 0; }
+          if [ -z "$GH_PAT" ]; then
+            echo "PAT 없음 — 건너뜀"
+            exit 0
+          fi
           pip install PyNaCl --quiet --break-system-packages 2>/dev/null
+
           PK=$(curl -sf \
             -H "Authorization: Bearer ${GH_PAT}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${REPO}/actions/secrets/public-key" || echo "")
-          [ -z "$PK" ] && { echo "Public key 조회 실패"; exit 0; }
+          if [ -z "$PK" ]; then
+            echo "Public key 조회 실패"
+            exit 0
+          fi
           KEY_ID=$(echo "$PK" | python3 -c "import sys,json; print(json.load(sys.stdin)['key_id'])")
           PUB_KEY=$(echo "$PK" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
+
           set_secret() {
             local N="$1" V="$2"
-            [ -z "$V" ] && return
+            [ -z "$V" ] && return 0
+            local ENC
             ENC=$(python3 -c "
-          import sys,base64
-          from nacl import encoding,public
-          pub=public.PublicKey(sys.argv[1].encode(),encoding.Base64Encoder)
-          enc=public.SealedBox(pub).encrypt(sys.argv[2].encode())
+          import sys, base64
+          from nacl import encoding, public
+          pub = public.PublicKey(sys.argv[1].encode(), encoding.Base64Encoder)
+          enc = public.SealedBox(pub).encrypt(sys.argv[2].encode())
           print(base64.b64encode(enc).decode())
           " "$PUB_KEY" "$V" 2>/dev/null)
+            local CODE
             CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
               -H "Authorization: Bearer ${GH_PAT}" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/${REPO}/actions/secrets/${N}" \
               -d "{\"encrypted_value\":\"${ENC}\",\"key_id\":\"${KEY_ID}\"}" || echo "000")
-            [ "$CODE" = "201" ] || [ "$CODE" = "204" ] && echo "✓ $N" || echo "✗ $N ($CODE)"
+            if [ "$CODE" = "201" ] || [ "$CODE" = "204" ]; then
+              echo "✓ $N"
+            else
+              echo "✗ $N (${CODE})"
+            fi
           }
-          set_secret "CF_ACCOUNT_ID"   "${{ inputs.secret_cf_account_id }}"
-          set_secret "CF_API_TOKEN"    "${{ inputs.secret_cf_api_token }}"
-          set_secret "WP_TUNNEL_TOKEN" "${WP_TUNNEL_TOKEN}"
+
+          set_secret "CF_ACCOUNT_ID"    "${{ inputs.secret_cf_account_id }}"
+          set_secret "CF_API_TOKEN"     "${{ inputs.secret_cf_api_token }}"
+          set_secret "WP_TUNNEL_TOKEN"  "${WP_TUNNEL_TOKEN}"
           set_secret "PMA_TUNNEL_TOKEN" "${PMA_TUNNEL_TOKEN}"
-          set_secret "DB_PASS"         "${DB_PASS}"
-          set_secret "REDIS_PASS"      "${REDIS_PASS}"
-          
-                # ────────────────────────────────────────────────
-                # STEP 11: DB 백업 + git push
-                # ────────────────────────────────────────────────
-                - name: DB 백업 및 커밋
-                  run: |
+          set_secret "DB_PASS"          "${DB_PASS}"
+          set_secret "REDIS_PASS"       "${REDIS_PASS}"
+
+      # ────────────────────────────────────────────────
+      # STEP 11: DB 백업 + git push
+      # ────────────────────────────────────────────────
+      - name: DB 백업 및 커밋
+        run: |
           mkdir -p wordpress/db-backup
           mysqldump -u wpuser -p"${DB_PASS}" -h 127.0.0.1 wordpress \
             2>/dev/null | gzip > wordpress/db-backup/latest.sql.gz
           echo "✓ DB 덤프 완료 ($(du -sh wordpress/db-backup/latest.sql.gz | cut -f1))"
+
           # .gitignore — wp-config.php는 제외 (비밀번호 포함)
           echo "wp-config.php" >> wordpress/.gitignore
           echo ".htaccess"     >> wordpress/.gitignore
+
           git config user.name  "wpspot-bot"
           git config user.email "bot@wpspot.app"
           git add -A
           git diff --cached --quiet || \
             git commit -m "chore: provision wordpress [${{ inputs.site_slug }}]"
           git push
-          
-                # ────────────────────────────────────────────────
-                # STEP 12: wpspot 콜백
-                # ────────────────────────────────────────────────
-                - name: wpspot 콜백
-                  run: |
+
+      # ────────────────────────────────────────────────
+      # STEP 12: wpspot 콜백 (완료)
+      # ────────────────────────────────────────────────
+      - name: wpspot 콜백 (활성화)
+        run: |
           CALLBACK="${{ inputs.wpspot_callback_url }}"
           SITE_ID="${{ inputs.wpspot_site_id }}"
           JWT="${{ inputs.wpspot_jwt }}"
-          [ -z "$CALLBACK" ] || [ -z "$SITE_ID" ] || [ -z "$JWT" ] && {
-            echo "콜백 정보 없음 — 건너뜀"; exit 0
-          }
+          if [ -z "$CALLBACK" ] || [ -z "$SITE_ID" ] || [ -z "$JWT" ]; then
+            echo "콜백 정보 없음 — 건너뜀"
+            exit 0
+          fi
+
           python3 - << PYEOF
           import json, urllib.request
           payload = json.dumps({
@@ -929,19 +1032,19 @@ jobs:
             'workerUrl':    '${WORKER_URL:-}',
             'finalSiteUrl': '${FINAL_SITE_URL:-}',
             'stack':        'nginx+php-fpm8.3+mariadb+redis7',
-            'status':       'active'
+            'status':       'active',
           }).encode()
           req = urllib.request.Request('${CALLBACK}', data=payload,
-            headers={'Authorization':'Bearer ${JWT}','Content-Type':'application/json'}, method='POST')
+            headers={'Authorization': 'Bearer ${JWT}', 'Content-Type': 'application/json'}, method='POST')
           try:
             r = urllib.request.urlopen(req, timeout=10)
             print('콜백 응답:', r.status)
           except Exception as e:
             print('::warning::콜백 실패:', e)
           PYEOF
-          
-                - name: 완료 요약
-                  run: |
+
+      - name: 완료 요약
+        run: |
           echo "================================================"
           echo "  wpspot 프로비저닝 완료"
           echo "  스택: nginx + PHP-FPM 8.3 + MariaDB + Redis 7"
@@ -956,35 +1059,34 @@ jobs:
           echo "  Redis 7: 6379 (로컬, 무료)"
           echo "  OPcache: 128MB"
           echo "================================================"
-          
-                # ────────────────────────────────────────────────
-                # STEP 13: 서버 유지 (6분 자동복구)
-                # ────────────────────────────────────────────────
-                - name: 서버/터널 유지 (6분)
-                  env:
-          WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
-          PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
-                  run: |
+
+      # ────────────────────────────────────────────────
+      # STEP 13: 서버 유지 (6분 자동복구)
+      # ────────────────────────────────────────────────
+      - name: 서버/터널 유지 (6분)
+        run: |
           recover() {
-            # nginx
-            sudo systemctl is-active nginx  > /dev/null 2>&1 || sudo systemctl restart nginx
-            # PHP-FPM
-            sudo systemctl is-active php8.3-fpm > /dev/null 2>&1 || sudo systemctl restart php8.3-fpm
-            # MariaDB
-            sudo systemctl is-active mariadb > /dev/null 2>&1 || sudo systemctl restart mariadb
-            # Redis
-            sudo systemctl is-active redis-server > /dev/null 2>&1 || sudo systemctl restart redis-server
-            # 터널
-            kill -0 "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null || {
-              [ -n "$WP_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-                --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:8080" \
-                --logfile /tmp/cf-wp.log 2>&1 & echo $! > /tmp/cf-wp.pid
-            }
-            kill -0 "$(cat /tmp/cf-pma.pid 2>/dev/null)" 2>/dev/null || {
-              [ -n "$PMA_TUNNEL_TOKEN" ] && cloudflared tunnel --no-autoupdate run \
-                --token "$PMA_TUNNEL_TOKEN" --url "http://${HOST_IP}:8081" \
-                --logfile /tmp/cf-pma.log 2>&1 & echo $! > /tmp/cf-pma.pid
-            }
+            sudo systemctl is-active nginx        > /dev/null 2>&1 || sudo systemctl restart nginx
+            sudo systemctl is-active php8.3-fpm    > /dev/null 2>&1 || sudo systemctl restart php8.3-fpm
+            sudo systemctl is-active mariadb       > /dev/null 2>&1 || sudo systemctl restart mariadb
+            sudo systemctl is-active redis-server  > /dev/null 2>&1 || sudo systemctl restart redis-server
+
+            if ! kill -0 "$(cat /tmp/cf-wp.pid 2>/dev/null)" 2>/dev/null; then
+              if [ -n "${WP_TUNNEL_TOKEN:-}" ]; then
+                cloudflared tunnel --no-autoupdate run \
+                  --token "$WP_TUNNEL_TOKEN" --url "http://${HOST_IP}:8080" \
+                  --logfile /tmp/cf-wp.log 2>&1 &
+                echo $! > /tmp/cf-wp.pid
+              fi
+            fi
+            if ! kill -0 "$(cat /tmp/cf-pma.pid 2>/dev/null)" 2>/dev/null; then
+              if [ -n "${PMA_TUNNEL_TOKEN:-}" ]; then
+                cloudflared tunnel --no-autoupdate run \
+                  --token "$PMA_TUNNEL_TOKEN" --url "http://${HOST_IP}:8081" \
+                  --logfile /tmp/cf-pma.log 2>&1 &
+                echo $! > /tmp/cf-pma.pid
+              fi
+            fi
           }
           for i in $(seq 1 6); do
             sleep 60
