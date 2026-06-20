@@ -144,6 +144,44 @@
     }
     .instance-card__footer .btn { width: auto; flex: 1; }
 
+    .instance-page-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: var(--color-grey-50, #fff);
+      padding-bottom: var(--space-3);
+    }
+
+    /* 새로 생성된 카드가 자리잡을 때 살짝 강조되는 애니메이션 */
+    @keyframes instance-card-enter {
+      from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .instance-card--entering { animation: instance-card-enter 280ms ease; }
+    .instance-card--provisioning {
+      border-color: var(--color-blue-200, #bfdbfe);
+    }
+
+    .instance-card__progress {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: var(--fs-body-3);
+      color: var(--text-secondary);
+      padding: var(--space-2) var(--space-5);
+      background: var(--color-blue-50, #eff6ff);
+      border-top: 1px solid var(--border-secondary);
+    }
+    .instance-card__progress .spinner {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      border: 2px solid var(--color-blue-200, #bfdbfe);
+      border-top-color: var(--color-blue-600, #2563eb);
+      animation: instance-spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes instance-spin { to { transform: rotate(360deg); } }
+
     /* ── 새 인스턴스 모달 ── */
     .modal-overlay {
       display: none;
@@ -171,7 +209,7 @@
     </div>
 
     <div class="screen">
-      <div class="section__header">
+      <div class="section__header instance-page-header">
         <div>
           <h1 class="h1" style="margin-bottom:2px;">인스턴스</h1>
           <p class="body-2">생성한 모든 호스팅 인스턴스를 한눈에 확인하고 관리하세요.</p>
@@ -225,6 +263,7 @@
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
 
     let allSites = [];
+    let pollTimer = null;
 
     if (wpspot.requireAuth()) load();
 
@@ -234,8 +273,21 @@
         const data = await wpspot.api("/api/sites");
         allSites = data.sites || [];
         renderGrid();
+        managePolling();
       } catch (e) {
         grid.innerHTML = `<div class="empty">${wpspot.escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    // 아직 구성 중인 인스턴스(서버 생성 중 / 서버 세팅 중)가 있으면 자동으로 5초마다 새로고침해서
+    // 배지가 "서버 생성 중 → 서버 세팅 중 → 서버 가동 중"으로 실시간에 가깝게 바뀌는 걸 보여준다.
+    function managePolling() {
+      const inProgress = allSites.some(s => s.status === "provisioning" || s.status === "setting_up" || s.status === "pending");
+      if (inProgress && !pollTimer) {
+        pollTimer = setInterval(load, 5000);
+      } else if (!inProgress && pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
       }
     }
 
@@ -264,6 +316,8 @@
       return "metric-mini__fill--ok";
     }
 
+    let newlyCreatedId = null;
+
     function renderGrid() {
       const grid = document.getElementById("instanceGrid");
       const q = (document.getElementById("searchInput").value || "").trim().toLowerCase();
@@ -287,15 +341,28 @@
         return;
       }
 
-      grid.innerHTML = filtered.map(cardHtml).join("");
+      grid.innerHTML = filtered.map(s => cardHtml(s, s.id === newlyCreatedId)).join("");
+      newlyCreatedId = null; // 애니메이션은 1회만
     }
 
-    function cardHtml(site) {
+    const progressLabel = {
+      pending:      "사이트 정보를 준비하고 있어요…",
+      provisioning: "GitHub Actions가 서버를 생성하고 있어요…",
+      setting_up:   "DNS · 데이터베이스 · 터널을 세팅하고 있어요…",
+    };
+
+    function cardHtml(site, isNew) {
       const m = metricsFor(site);
       const domain = site.custom_domain || "도메인 미연결";
       const detailUrl = `/instance-detail.html?site=${encodeURIComponent(site.id)}`;
+      const inProgress = ["pending", "provisioning", "setting_up"].includes(site.status);
+      const cardClasses = [
+        "instance-card",
+        isNew ? "instance-card--entering" : "",
+        inProgress ? "instance-card--provisioning" : "",
+      ].filter(Boolean).join(" ");
       return `
-        <div class="instance-card">
+        <div class="${cardClasses}" data-site-id="${wpspot.escapeHtml(site.id)}">
           <div class="instance-card__top" onclick="location.href='${detailUrl}'">
             <div class="instance-card__head">
               <div>
@@ -305,6 +372,12 @@
               ${wpspot.statusBadge(site.status)}
             </div>
           </div>
+
+          ${inProgress ? `
+          <div class="instance-card__progress">
+            <span class="spinner"></span>
+            <span>${progressLabel[site.status] || "구성 중이에요…"}</span>
+          </div>` : ""}
 
           <div class="instance-card__metrics">
             <div>
@@ -361,9 +434,23 @@
           method: "POST",
           body: JSON.stringify({ siteName: name }),
         });
+
+        // 페이지 이동 없이 바로 그리드에 카드를 추가한다. (도메인 연결 전까지는 'pending' 상태로 표시되고,
+        // 도메인 연결 후 프로비저닝이 시작되면 배지가 자동으로 "서버 생성 중 → 서버 세팅 중 → 서버 가동 중"으로 바뀐다.)
+        allSites.unshift({
+          id: res.id,
+          site_name: res.siteName,
+          site_slug: res.siteSlug,
+          custom_domain: null,
+          status: res.status || "pending",
+          created_at: Math.floor(Date.now() / 1000),
+        });
+        newlyCreatedId = res.id;
+        renderGrid();
+        managePolling();
+
         closeCreateModal();
-        wpspot.toast("인스턴스가 생성됐어요. 도메인을 연결해주세요.", "success");
-        location.href = `/instance-detail.html?site=${encodeURIComponent(res.id)}`;
+        wpspot.toast("인스턴스가 생성됐어요. 카드의 '관리'에서 도메인을 연결하면 자동으로 구성이 시작돼요.", "success");
       } catch (e) {
         errEl.textContent = e.message;
         errEl.classList.remove("hidden");
