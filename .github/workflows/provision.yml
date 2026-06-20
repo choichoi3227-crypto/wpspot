@@ -638,34 +638,85 @@ jobs:
           npm install -g wrangler --quiet --no-progress 2>/dev/null
 
           deploy_worker() {
-            local NAME="$1" TUNNEL_HOST="$2" WORKDIR="/tmp/cf-${NAME}"
+            local NAME="$1" TUNNEL_HOST="$2"
+            local WORKDIR="/tmp/cf-${NAME}"
             mkdir -p "$WORKDIR"
             python3 - << PYEOF
           js = r"""export default {
             async fetch(request, env) {
               const origin = env.TUNNEL_ORIGIN;
               if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+              const id = env.GOVERNOR.idFromName('main');
+              return env.GOVERNOR.get(id).fetch(request);
+            }
+          };
+
+          // TrafficGovernor — 사이트당 1개 인스턴스(SQLite 기반 Durable Object, 무료 플랜 호환)
+          // - 동시 처리 수를 PHP-FPM 풀 용량(www 10 + www2 10)에 맞춰 제한 → origin 과부하 방지(트래픽 스무딩)
+          // - 쿠키 없는 GET 응답을 짧게 캐시 → 동일 페이지 반복 요청을 origin까지 보내지 않음(작업 처리 효율화)
+          export class TrafficGovernor {
+            constructor(ctx, env) {
+              this.env = env;
+              this.inFlight = 0;
+              this.maxConcurrent = 18;
+              this.cache = new Map();
+            }
+            async fetch(request) {
+              const origin = this.env.TUNNEL_ORIGIN;
               const url = new URL(request.url);
-              const t = new URL(origin);
-              t.pathname = url.pathname; t.search = url.search;
-              const h = new Headers(request.headers);
-              h.set('host', new URL(origin).host);
-              h.set('x-forwarded-proto','https');
-              h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
+              const method = request.method;
+              const cacheKey = url.pathname + url.search;
+              const cacheable = method === 'GET' && !request.headers.get('cookie')
+                && !/\/(wp-admin|wp-login\.php|xmlrpc\.php)/.test(url.pathname);
+
+              if (cacheable) {
+                const hit = this.cache.get(cacheKey);
+                if (hit && hit.expires > Date.now()) {
+                  return new Response(hit.body, {status:hit.status, headers:{...hit.headers,'x-wpspot-cache':'HIT'}});
+                }
+              }
+
+              if (this.inFlight >= this.maxConcurrent) {
+                await new Promise(r => setTimeout(r, 150 + Math.floor(Math.random() * 250)));
+                if (this.inFlight >= this.maxConcurrent) {
+                  return new Response(busy(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'2'}});
+                }
+              }
+
+              this.inFlight++;
               try {
+                const t = new URL(origin);
+                t.pathname = url.pathname; t.search = url.search;
+                const h = new Headers(request.headers);
+                h.set('host', t.host);
+                h.set('x-forwarded-proto','https');
+                h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
                 const r = await fetch(t.toString(), {
-                  method: request.method, headers: h,
-                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  method, headers: h,
+                  body: ['GET','HEAD'].includes(method) ? undefined : request.body,
                   redirect: 'manual'
                 });
+
+                if (cacheable && r.status === 200) {
+                  const body = await r.clone().text();
+                  const headers = {};
+                  r.headers.forEach((v,k) => { if (k !== 'set-cookie') headers[k] = v; });
+                  this.cache.set(cacheKey, {body, status:r.status, headers, expires: Date.now() + 5000});
+                  if (this.cache.size > 200) this.cache.delete(this.cache.keys().next().value);
+                }
+
                 const out = new Headers(r.headers);
                 out.set('x-powered-by','wpspot/nginx+php-fpm');
+                out.set('x-wpspot-cache','MISS');
                 return new Response(r.body, {status:r.status, headers:out});
               } catch(e) {
                 return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+              } finally {
+                this.inFlight--;
               }
             }
-          };
+          }
+
           function offline(m=''){
             return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="30"><title>잠시 후 이용 가능해요</title>'
               +'<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
@@ -677,16 +728,37 @@ jobs:
               +'<body><div class="box"><div><span class="dot"></span></div><h2>서버 준비 중이에요</h2>'
               +'<p>30초 후 자동으로 새로고침됩니다.</p>'
               +(m?'<p style="font-size:.75rem;color:#94a3b8;margin-top:12px">'+m+'</p>':'')+'</div></body></html>';
+          }
+
+          function busy(){
+            return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="2"><title>접속이 많아요</title>'
+              +'<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+              +'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
+              +'.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
+              +'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}</style></head>'
+              +'<body><div class="box"><h2>접속이 많아 잠시 대기 중이에요</h2><p>곧바로 다시 시도해 주세요.</p></div></body></html>';
           }"""
           open('${WORKDIR}/worker.js','w').write(js)
           PYEOF
             python3 -c "
           name='${NAME}'; host='${TUNNEL_HOST}'
-          toml='name=\"'+name+'\"\nmain=\"worker.js\"\ncompatibility_date=\"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN=\"https://'+host+'\"\n'
+          toml = ('name=\"'+name+'\"\n'
+                  'main=\"worker.js\"\n'
+                  'compatibility_date=\"2024-09-23\"\n'
+                  '[vars]\n'
+                  'TUNNEL_ORIGIN=\"https://'+host+'\"\n'
+                  '\n'
+                  '[[durable_objects.bindings]]\n'
+                  'name=\"GOVERNOR\"\n'
+                  'class_name=\"TrafficGovernor\"\n'
+                  '\n'
+                  '[[migrations]]\n'
+                  'tag=\"v1\"\n'
+                  'new_sqlite_classes=[\"TrafficGovernor\"]\n')
           open('${WORKDIR}/wrangler.toml','w').write(toml)
           "
             cd "$WORKDIR" && wrangler deploy --minify
-            echo "✓ Worker 배포: ${NAME}"
+            echo "✓ Worker 배포 (TrafficGovernor DO 연동): ${NAME}"
           }
 
           deploy_worker "$WORKER_NAME"  "$WP_TUNNEL_HOST"
@@ -750,6 +822,9 @@ jobs:
           
           register_domain "${{ inputs.custom_domain }}" "$WORKER_NAME"
           register_domain "${{ inputs.pma_domain }}"    "$PMA_WORKER"
+
+          CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
+          [ -n "$CUSTOM_DOMAIN" ] && register_domain "www.${CUSTOM_DOMAIN}" "$WORKER_NAME"
           
                 # ────────────────────────────────────────────────
                 # STEP 10: GitHub Secrets 등록

@@ -154,6 +154,7 @@ jobs:
       - name: nginx 설정 및 시작
         env:
           DB_PASS: ${{ secrets.DB_PASS }}
+          REDIS_PASS: ${{ secrets.REDIS_PASS }}
         run: |
           WP_ABS="${REPO_ROOT}/${WP_DIR}"
           PMA_ABS="${REPO_ROOT}/${PMA_DIR}"
@@ -162,10 +163,8 @@ jobs:
           if [ -f "${WP_ABS}/wp-config.php" ]; then
             sudo sed -i "s/define('DB_PASSWORD', '[^']*')/define('DB_PASSWORD', '${DB_PASS}')/" \
               "${WP_ABS}/wp-config.php"
-            sudo sed -i "s/define('WP_REDIS_PASSWORD', '[^']*')/define('WP_REDIS_PASSWORD', '$(cat /dev/stdin << EOPASS
-${{ secrets.REDIS_PASS }}
-EOPASS
-)')/" "${WP_ABS}/wp-config.php" 2>/dev/null || true
+            sudo sed -i "s/define('WP_REDIS_PASSWORD', '[^']*')/define('WP_REDIS_PASSWORD', '${REDIS_PASS}')/" \
+              "${WP_ABS}/wp-config.php" 2>/dev/null || true
           fi
 
           # upstream

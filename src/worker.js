@@ -207,20 +207,11 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
       ).bind(zoneId || "", customDomain).run();
     }
 
-    // Zone에 DNS 레코드 + Worker Route 연결
-    // Worker Route는 호스트명에 proxied DNS 레코드가 있어야 매칭됨
-    if (zoneId) {
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain).catch(e => console.error("DNS(root) 실패:", e.message));
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`).catch(e => console.error("DNS(www) 실패:", e.message));
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`).catch(e => console.error("DNS(pma) 실패:", e.message));
-
-      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName)
-        .catch(e => console.error("Route(root) 실패:", e.message));
-      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName)
-        .catch(e => console.error("Route(www) 실패:", e.message));
-      await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}/*`, `${workerName}-pma`)
-        .catch(e => console.error("Route(pma) 실패:", e.message));
-    }
+    // 참고: 여기서 DNS/Worker Route를 미리 걸지 않는다.
+    // workerName(및 -pma)에 해당하는 실제 Worker 스크립트는 아직 배포되지 않은 상태이며
+    // (provision.yml의 "Cloudflare Worker 배포 + 커스텀 도메인 등록" 단계가 3~5분 후
+    // wrangler로 배포 + Custom Domain 등록까지 함께 처리함), 이 시점에 Route를 걸면
+    // "Worker가 존재하지 않음"(code 10019) 오류만 매번 발생하고 무의미하게 끝난다.
 
     await env.DB.prepare(
       "UPDATE site_jobs SET status='success', message=?, finished_at=strftime('%s','now') WHERE id=?"
