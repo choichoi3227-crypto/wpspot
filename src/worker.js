@@ -354,6 +354,24 @@ async function handleApi(request, env, url) {
           "UPDATE site_credentials SET nginx_status='active' WHERE site_id=?"
         ).bind(siteId).run().catch(() => {});
       }
+    } else if (status === "setting_up") {
+      // GitHub Actions가 DNS/터널/Worker 세팅 단계로 진입했음을 알리는 중간 콜백.
+      // (해당 단계까지는 site_credentials 행이 이미 provisionSite()에서 만들어져 있어야 정상이지만,
+      //  혹시 없을 경우를 대비해 INSERT … OR IGNORE로 안전하게 처리)
+      const cred = await env.DB.prepare(
+        "SELECT site_id FROM site_credentials WHERE site_id=?"
+      ).bind(siteId).first().catch(() => null);
+      if (!cred) {
+        await env.DB.prepare(
+          `INSERT INTO site_credentials
+           (site_id, pla_username, pla_password_hash, db_path, nginx_status)
+           VALUES (?, 'admin', '', 'wordpress@127.0.0.1:3306', 'provisioning')`
+        ).bind(siteId).run().catch(() => {});
+      } else {
+        await env.DB.prepare(
+          "UPDATE site_credentials SET nginx_status='provisioning' WHERE site_id=?"
+        ).bind(siteId).run().catch(() => {});
+      }
     }
 
     return json({ ok: true });
@@ -543,9 +561,19 @@ async function handleApi(request, env, url) {
     const cfKey = await decryptSecret(env, cred.cf_global_api_key_enc);
     const workerName = site.cf_worker_name;
     if (workerName) {
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain).catch(() => {});
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`).catch(() => {});
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`).catch(() => {});
+      // CNAME 대상으로 쓸 workers.dev 호스트 확보 (실패해도 무시하고 자기참조 CNAME으로 진행)
+      let cnameTarget = null;
+      try {
+        let accountId = cred.cf_account_id;
+        if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
+        const sub = await cf.getWorkerSubdomain(cred.cf_account_email, cfKey, accountId);
+        cnameTarget = `${workerName}.${sub}.workers.dev`;
+      } catch (_) {}
+      const pmaCnameTarget = cnameTarget ? `${workerName}-pma.${cnameTarget.split(".").slice(1).join(".")}` : null;
+
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, customDomain, cnameTarget).catch(() => {});
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}`, cnameTarget).catch(() => {});
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}`, pmaCnameTarget).catch(() => {});
       await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `${customDomain}/*`, workerName).catch(() => {});
       await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `www.${customDomain}/*`, workerName).catch(() => {});
       await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${customDomain}/*`, `${workerName}-pma`).catch(() => {});
@@ -612,13 +640,21 @@ async function handleApi(request, env, url) {
 
     const wantsRedirect = finalRole === "alias" && !!redirectToPrimary && !!existingPrimary;
 
+    // CNAME 대상으로 쓸 workers.dev 호스트 확보 (실패해도 자기참조 CNAME으로 진행)
+    let cnameTarget = null;
+    let accountId = cred.cf_account_id;
+    try {
+      if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
+      const sub = await cf.getWorkerSubdomain(cred.cf_account_email, cfKey, accountId);
+      cnameTarget = `${site.cf_worker_name}.${sub}.workers.dev`;
+    } catch (_) {}
+
     let routeTarget = site.cf_worker_name;
     try {
-      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, hostname);
+      await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, hostname, cnameTarget);
 
       if (wantsRedirect) {
         // 별도의 경량 301 리다이렉트 워커를 배포하고, 그 워커로 라우트를 건다.
-        let accountId = cred.cf_account_id;
         if (!accountId) accountId = await cf.getAccountId(cred.cf_account_email, cfKey);
         const redirectWorkerName = `${site.cf_worker_name}-redir-${hostname.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`.slice(0, 63);
         const redirectJs = buildRedirectWorkerJs(existingPrimary.hostname);
@@ -630,7 +666,8 @@ async function handleApi(request, env, url) {
 
       // 이번 등록이 Primary라면 pma.{hostname}도 함께 연결
       if (finalRole === "primary") {
-        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${hostname}`);
+        const pmaCnameTarget = cnameTarget ? `${site.cf_worker_name}-pma.${cnameTarget.split(".").slice(1).join(".")}` : null;
+        await cf.ensureProxiedRecord(cred.cf_account_email, cfKey, zoneId, `pma.${hostname}`, pmaCnameTarget);
         await cf.addWorkerRoute(cred.cf_account_email, cfKey, zoneId, `pma.${hostname}/*`, `${site.cf_worker_name}-pma`).catch(() => {});
       }
     } catch (e) {
