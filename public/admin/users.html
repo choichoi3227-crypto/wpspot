@@ -68,8 +68,8 @@
 </div>
 <script src="/js/app.js"></script>
 <script>
-  wpspot.requireAuth();
-  wpspot.renderShell('admin-users', '사용자 관리', true);
+  wpspot.requireAdmin();
+  wpspot.renderShell('admin-users', '사용자 관리');
 
   let users = [], filtered = [], page = 1, perPage = 20;
 
@@ -103,7 +103,7 @@
         <td><span class="badge ${u.active?'badge--green':'badge--grey'}">${u.active?'활성':'비활성'}</span></td>
         <td>
           <button class="btn btn--outline btn--sm" onclick="viewUser('${u.id}')">상세</button>
-          <button class="btn btn--danger btn--sm" onclick="suspendUser('${u.id}')">정지</button>
+          <button class="btn ${u.active?'btn--danger':'btn--success'} btn--sm" onclick="suspendUser('${u.id}')">${u.active?'정지':'활성화'}</button>
         </td>
       </tr>
     `).join('');
@@ -120,7 +120,18 @@
 
   function goPage(p) { page = p; renderTable(); }
   function viewUser(id) { location.href = '/admin/user-detail.html?id='+id; }
-  function suspendUser(id) { if(confirm('이 사용자를 정지하겠습니까?')) { wpspot.toast('처리 중...','info'); } }
+  function suspendUser(id) {
+    const u = users.find(x => x.id === id);
+    const nextActive = u ? !u.active : false;
+    if (!confirm(nextActive ? '이 사용자를 다시 활성화하겠습니까?' : '이 사용자를 정지하겠습니까?')) return;
+    wpspot.api('/api/admin/users/'+id, { method:'PATCH', body: JSON.stringify({ active: nextActive }) })
+      .then(() => {
+        wpspot.toast(nextActive ? '활성화했어요.' : '정지했어요.', 'success');
+        if (u) u.active = nextActive;
+        filterUsers();
+      })
+      .catch(e => wpspot.toast(e.message, 'error'));
+  }
   function exportUsers() { wpspot.toast('CSV 내보내기 준비 중...','info'); }
 
   wpspot.api('/api/admin/users').then(data => {
