@@ -566,34 +566,45 @@ jobs:
           #  버려서 이후 모든 단계가 실패했다. 줄 단위로 분리해 그 문제를 원천적으로 없앤다.)
           create_or_get_tunnel() {
             local NAME="$1"
-            local RESP ID TOKEN
+            local RESP BODY HTTP_CODE ID TOKEN
 
-            RESP=$(curl -s -X POST \
+            # 토큰 권한 사전 점검 (Account → Cloudflare Tunnel:Edit 권한이 없으면
+            # 아래 POST가 200을 줘도 result가 비어 있거나, 403/9109 등으로 실패한다)
+            RESP=$(curl -s -w '\n%{http_code}' -X POST \
               "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel" \
               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
               -H "Content-Type: application/json" \
               -d "{\"name\":\"${NAME}\",\"tunnel_secret\":\"$(openssl rand -base64 32)\"}")
-            ID=$(echo "$RESP" | python3 -c \
+            HTTP_CODE=$(echo "$RESP" | tail -n1)
+            BODY=$(echo "$RESP" | sed '$d')
+            ID=$(echo "$BODY" | python3 -c \
               "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('id') or '')" 2>/dev/null)
 
             if [ -z "$ID" ]; then
-              RESP=$(curl -s \
+              echo "::warning::터널 생성 POST 실패(HTTP ${HTTP_CODE}) — 기존 터널 재사용 시도: $NAME"
+              echo "::warning::CF 응답: $(echo "$BODY" | head -c 500)"
+              RESP=$(curl -s -w '\n%{http_code}' \
                 "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?name=${NAME}&is_deleted=false" \
                 -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
-              ID=$(echo "$RESP" | python3 -c \
+              HTTP_CODE=$(echo "$RESP" | tail -n1)
+              BODY=$(echo "$RESP" | sed '$d')
+              ID=$(echo "$BODY" | python3 -c \
                 "import sys,json; r=json.load(sys.stdin).get('result') or []; print(r[0]['id'] if r else '')" 2>/dev/null)
             fi
             if [ -z "$ID" ]; then
-              echo "::error::Tunnel 생성 실패: $NAME — 응답: $(echo "$RESP" | head -c 300)"
+              echo "::error::Tunnel 생성/조회 실패: $NAME — HTTP ${HTTP_CODE} — 응답: $(echo "$BODY" | head -c 500)"
+              echo "::error::CLOUDFLARE_API_TOKEN에 'Account > Cloudflare Tunnel > Edit' 권한이 있는지, CLOUDFLARE_ACCOUNT_ID가 맞는지 확인하세요."
               return 1
             fi
 
-            TOKEN=$(curl -s \
+            RESP=$(curl -s -w '\n%{http_code}' \
               "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${ID}/token" \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin).get('result') or '')" 2>/dev/null)
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+            HTTP_CODE=$(echo "$RESP" | tail -n1)
+            BODY=$(echo "$RESP" | sed '$d')
+            TOKEN=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result') or '')" 2>/dev/null)
             if [ -z "$TOKEN" ]; then
-              echo "::error::Tunnel Token 조회 실패: $NAME"
+              echo "::error::Tunnel Token 조회 실패: $NAME — HTTP ${HTTP_CODE} — 응답: $(echo "$BODY" | head -c 500)"
               return 1
             fi
 
