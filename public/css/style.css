@@ -1,3 +1,4 @@
+
 /* public/css/style.css — wpspot */
 @import url("tokens.css");
 
@@ -157,6 +158,8 @@ body.wps-has-shell .screen {
 }
 .btn:active { filter: brightness(0.94); }
 .btn:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--fill-brand); outline-offset: 2px; }
+.btn { cursor: pointer; }
 
 .btn--xl  { height: 52px; border-radius: var(--radius-m); }
 .btn--l   { height: 44px; border-radius: var(--radius-m); }
@@ -172,6 +175,8 @@ body.wps-has-shell .screen {
 .btn--outline:hover { background: var(--color-grey-50); }
 .btn--danger    { background: var(--fill-danger); color: #fff; }
 .btn--danger:hover { background: #DC2626; }
+.btn--success   { background: #059669; color: #fff; }
+.btn--success:hover { background: #047857; }
 .btn--ghost     { background: transparent; color: var(--text-brand); }
 .btn--ghost:hover { background: var(--color-blue-50); }
 
@@ -265,6 +270,9 @@ body.wps-has-shell .screen {
 .badge--registered  { background: #D1FAE5; color: #059669; }
 .badge--missing     { background: #FEF3C7; color: #D97706; }
 .badge--blue        { background: var(--color-blue-50); color: var(--text-brand); }
+.badge--green       { background: #D1FAE5; color: #059669; }
+.badge--grey        { background: var(--fill-secondary); color: var(--text-secondary); }
+.badge--red          { background: #FEE2E2; color: #DC2626; }
 
 .status-badge {
   display: inline-flex; align-items: center; gap: 6px;
@@ -348,6 +356,12 @@ body.wps-has-shell .screen {
 .page-breadcrumb a { color: var(--text-brand); }
 .page-breadcrumb__sep { color: var(--text-tertiary); }
 .page-title { font-size: var(--fs-h3); font-weight: 700; margin-top: var(--space-2); }
+
+.admin-banner {
+  background: #111827; color: #fbbf24; text-align: center;
+  font-size: var(--fs-label-s); font-weight: 700; letter-spacing: .04em;
+  padding: 8px 16px;
+}
 
 /* =========================================================================
    툴바
