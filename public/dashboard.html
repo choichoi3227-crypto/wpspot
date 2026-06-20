@@ -5,359 +5,151 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>대시보드 — wpspot</title>
   <link rel="stylesheet" href="/css/style.css" />
-  <style>
-    .domain-select-row {
-      display: flex;
-      gap: var(--space-2);
-      align-items: center;
-    }
-    .domain-select-row select {
-      flex: 1;
-      padding: 9px 12px;
-      border: 1.5px solid var(--border-secondary);
-      border-radius: var(--radius-m);
-      font-size: var(--fs-body-2);
-      background: var(--fill-weak);
-      color: var(--text-primary);
-      outline: none;
-      cursor: pointer;
-    }
-    .domain-select-row select:focus {
-      border-color: var(--fill-brand);
-      background: var(--color-white);
-    }
-    .subdomain-row {
-      display: none;
-      align-items: center;
-      gap: 6px;
-      margin-top: var(--space-2);
-    }
-    .subdomain-row.visible { display: flex; }
-    .subdomain-row input {
-      width: 140px;
-      padding: 8px 10px;
-      border: 1.5px solid var(--border-secondary);
-      border-radius: var(--radius-m);
-      font-size: var(--fs-body-2);
-      background: var(--fill-weak);
-      outline: none;
-    }
-    .subdomain-row input:focus {
-      border-color: var(--fill-brand);
-      background: var(--color-white);
-    }
-    .subdomain-sep { color: var(--text-secondary); font-family: monospace; font-size: var(--fs-body-2); }
-    .subdomain-base { font-family: monospace; font-size: var(--fs-body-2); color: var(--text-primary); }
-    .domain-preview {
-      font-size: var(--fs-body-3);
-      color: var(--text-secondary);
-      margin-top: 5px;
-      font-family: monospace;
-    }
-    .domain-preview b { color: var(--text-brand); }
-  </style>
 </head>
 <body>
-  <div class="app-shell">
-    <div class="top-bar">
-      <span class="top-bar__brand">wpspot</span>
+<div class="app-shell">
+  <!-- 호스팅 없음 배너 -->
+  <div class="notice-banner" id="noHostingBanner">
+    <div>
+      <strong class="notice-banner__text">아직 개설된 호스팅이 없어요</strong>
+      <div class="notice-banner__text" style="margin-top:4px;font-size:13px;font-weight:400;">회원님 계정에서 설정된 호스팅이 아직 없는 것 같아요. 1분 만에 생성 가능한 워드프레스 호스팅을 시작해보세요.</div>
     </div>
+    <a href="/pricing.html" class="notice-banner__action">1분 만에 시작하기</a>
+  </div>
 
-    <div class="screen">
-      <h1 class="h1 mt-2">내 사이트</h1>
-
-      <div class="kpi-grid" id="kpiGrid"></div>
-
-      <!-- 사이트 생성 -->
-      <section class="section">
-        <div class="card">
-          <div class="title-1">새 사이트 만들기</div>
-
-          <div class="field mt-4">
-            <label class="field__label" for="siteName">사이트 이름</label>
-            <input class="field__input" type="text" id="siteName" placeholder="내 블로그" maxlength="60" />
-            <div class="field__help">어떤 이름이든 괜찮아요.</div>
-          </div>
-
-          <div class="field">
-            <label class="field__label">도메인 <span style="font-weight:400;color:var(--text-secondary);">(Cloudflare 네임서버 기반)</span></label>
-            <div class="domain-select-row">
-              <select id="domainSelect" onchange="onDomainChange()">
-                <option value="">— 불러오는 중… —</option>
-              </select>
-              <a href="/domains.html" class="btn btn--secondary btn--s" style="white-space:nowrap;flex-shrink:0;" target="_blank">+ 추가</a>
-            </div>
-            <!-- 서브도메인 -->
-            <div class="subdomain-row" id="subdomainRow">
-              <input type="text" id="subdomainInput" placeholder="www (비워두면 루트)" oninput="updatePreview()" />
-              <span class="subdomain-sep">.</span>
-              <span class="subdomain-base" id="subdomainBase"></span>
-            </div>
-            <div class="domain-preview" id="domainPreview"></div>
-            <div class="field__help">없으면 나중에 호스팅 관리에서 연결할 수 있어요.</div>
-          </div>
-
-          <div id="createError" style="color:var(--text-danger);font-size:var(--fs-body-3);margin-bottom:var(--space-3);display:none;"></div>
-          <button class="btn btn--primary btn--l" id="createBtn" onclick="createSite()">사이트 추가</button>
+  <!-- KPI 그리드 -->
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-card__label">
+        <span>이번 달 청구 예정</span>
+        <span class="kpi-card__new" onclick="location.href='/billing.html'">새로고침</span>
+      </div>
+      <div class="kpi-card__value" id="kpiCharge">$0</div>
+      <div class="kpi-card__sub">결제 예정일 : 없음 &nbsp;&nbsp; 전월 결제액 : $0</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label">
+        <span>미납 요금 안내</span>
+        <span class="kpi-card__new" onclick="location.href='/billing.html'">새로고침</span>
+      </div>
+      <div class="kpi-card__value" id="kpiUnpaid">$0</div>
+      <div class="kpi-card__sub">7일이 지날 경우, 미납된 서비스는 자동으로 삭제 처리 되며, 복구가 불가능합니다.</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label"><span>공지사항</span><a href="/notices.html" class="kpi-card__new">자세히</a></div>
+      <div id="noticeList" class="news-list" style="margin-top:8px;">
+        <div class="news-item">
+          <span class="news-item__badge">공지</span>
+          <span class="news-item__title">(중요) 워드프레스 플랜 이용약관 개정 공...</span>
+          <span class="news-item__date">2026.06.08</span>
         </div>
-      </section>
-
-      <!-- 사이트 목록 -->
-      <section class="section">
-        <div class="section__header">
-          <span class="title-1" style="margin:0;">사이트 목록</span>
+        <div class="news-item">
+          <span class="news-item__badge">공지</span>
+          <span class="news-item__title">(중요) 워드프레스 7.0 업데이트로 인한 공...</span>
+          <span class="news-item__date">2026.05.21</span>
         </div>
-        <div id="siteList">
-          <div class="empty" style="padding:var(--space-8);">불러오는 중…</div>
+        <div class="news-item">
+          <span class="news-item__badge">공지</span>
+          <span class="news-item__title">리눅스 OS Copy Fail (CVE-2026-314…</span>
+          <span class="news-item__date">2026.05.13</span>
         </div>
-      </section>
+      </div>
     </div>
   </div>
 
-  <script src="/js/app.js"></script>
-  <script>
-    wpspot.renderShell("dashboard", "대시보드");
+  <!-- 내 호스팅 -->
+  <div class="section-hd">
+    <div class="section-hd__title">내 호스팅</div>
+    <a href="/hosting.html" class="section-hd__action">전체 보기</a>
+  </div>
+  <div id="hostingList" style="display:flex;flex-direction:column;gap:12px;margin-bottom:28px;">
+    <div class="empty-card">
+      <div class="empty-card__icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/></svg>
+      </div>
+      <div>
+        <div class="empty-card__text">호스팅이 없습니다</div>
+        <div class="empty-card__sub">현재 계정에 호스팅이 없습니다.</div>
+      </div>
+    </div>
+  </div>
 
-    let zones = [];
+  <!-- 내 도메인 영역 -->
+  <div class="section-hd">
+    <div class="section-hd__title">내 도메인 영역</div>
+    <a href="/domains.html" class="section-hd__action">전체 보기</a>
+  </div>
+  <div id="domainList" style="display:flex;flex-direction:column;gap:10px;">
+    <div class="empty-card">
+      <div class="empty-card__icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7a1 1 0 0 1 1-1h4l2 2h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7z"/></svg>
+      </div>
+      <div>
+        <div class="empty-card__text">도메인이 없습니다</div>
+        <div class="empty-card__sub">현재 계정에 연결된 도메인이 없습니다.</div>
+      </div>
+    </div>
+  </div>
 
-    if (wpspot.requireAuth()) {
-      loadZones();
-      loadSites();
-    }
+  <!-- 미디어 / 이미지 섹션 -->
+  <div class="section-hd mt-6" style="margin-top:32px;">
+    <div class="section-hd__title">워드프레스 호스팅 소개</div>
+  </div>
+  <div class="media-grid" style="margin-bottom:28px;">
+    <div class="media-card">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/98/WordPress_blue_logo.svg/320px-WordPress_blue_logo.svg.png"
+           alt="WordPress 공식 로고" style="object-fit:contain;background:#f0f4f8;padding:20px;height:120px;" />
+      <div class="media-card__body">
+        <div class="media-card__title">WordPress 공식 엔진</div>
+        <div class="media-card__sub">최신 WordPress 코어 기반</div>
+      </div>
+    </div>
+    <div class="media-card">
+      <img src="https://images.unsplash.com/photo-1614064641938-3bbee52942c7?w=400&h=200&fit=crop"
+           alt="서버 보안 자물쇠" style="height:120px;object-fit:cover;" />
+      <div class="media-card__body">
+        <div class="media-card__title">WAF 보안 기본 제공</div>
+        <div class="media-card__sub">웹 방화벽 + SSL 자동 적용</div>
+      </div>
+    </div>
+    <div class="media-card">
+      <img src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=400&h=200&fit=crop"
+           alt="CDN 네트워크" style="height:120px;object-fit:cover;" />
+      <div class="media-card__body">
+        <div class="media-card__title">글로벌 CDN 적극 제공</div>
+        <div class="media-card__sub">Cloudflare CDN 기본 탑재</div>
+      </div>
+    </div>
+    <div class="media-card">
+      <img src="https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=400&h=200&fit=crop"
+           alt="무제한 트래픽" style="height:120px;object-fit:cover;" />
+      <div class="media-card__body">
+        <div class="media-card__title">트래픽 무제한</div>
+        <div class="media-card__sub">DB 무제한 · MySQL · MariaDB</div>
+      </div>
+    </div>
+  </div>
 
-    function renderKpis(sites) {
-      const total = sites.length;
-      const activeCount = sites.filter(s => s.status === "active").length;
-      const provisioningCount = sites.filter(s => s.status === "provisioning").length;
-      const domainsCount = sites.filter(s => s.custom_domain).length;
-      const cards = [
-        { label: "전체 사이트", value: total, icon: "🌐", bg: "var(--color-blue-50)", color: "var(--text-brand)" },
-        { label: "운영 중", value: activeCount, icon: "✅", bg: "#D1FAE5", color: "#059669" },
-        { label: "구성 중", value: provisioningCount, icon: "⏳", bg: "#FEF3C7", color: "#D97706" },
-        { label: "도메인 연결", value: domainsCount, icon: "🔗", bg: "#EDE9FE", color: "#7C3AED" },
-      ];
-      document.getElementById("kpiGrid").innerHTML = cards.map(c => `
-        <div class="kpi-card">
-          <div class="kpi-card__icon" style="background:${c.bg};color:${c.color};">${c.icon}</div>
-          <div class="kpi-card__label">${c.label}</div>
-          <div class="kpi-card__value tabular">${c.value}</div>
-        </div>
-      `).join("");
-    }
+  <!-- 동영상/GIF -->
+  <div class="section-hd">
+    <div class="section-hd__title">워드프레스 호스팅 설치 가이드</div>
+  </div>
+  <div style="background:#fff;border:1px solid var(--border-secondary);border-radius:16px;overflow:hidden;margin-bottom:28px;">
+    <div style="position:relative;padding-bottom:56.25%;background:#0a0a0a;">
+      <img src="https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif"
+           alt="워드프레스 설치 GIF" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" />
+    </div>
+    <div style="padding:16px 20px;">
+      <div style="font-size:15px;font-weight:700;">1분 만에 WordPress 호스팅 시작</div>
+      <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;">클릭 몇 번으로 완성되는 자동 프로비저닝 시스템</div>
+    </div>
+  </div>
+</div>
 
-    // Enter 키로 사이트 추가
-    document.getElementById("siteName").addEventListener("keydown", e => {
-      if (e.key === "Enter") createSite();
-    });
-
-    // ── Zone 목록 ─────────────────────────────────────────────────────────
-    async function loadZones() {
-      const sel = document.getElementById("domainSelect");
-      try {
-        const data = await wpspot.api("/api/domains");
-        zones = data.zones || [];
-        if (!zones.length) {
-          sel.innerHTML = '<option value="">— 등록된 도메인 없음 —</option>';
-          return;
-        }
-        sel.innerHTML =
-          '<option value="">— 나중에 연결 (선택 안 함) —</option>' +
-          zones.map(z =>
-            `<option value="${esc(z.id)}" data-name="${esc(z.name)}">`
-            + `${esc(z.name)}${z.status === 'active' ? ' ✅' : ' ⏳'}`
-            + `</option>`
-          ).join("");
-      } catch (e) {
-        sel.innerHTML = `<option value="">로드 실패: ${esc(e.message)}</option>`;
-      }
-    }
-
-    function onDomainChange() {
-      const sel = document.getElementById("domainSelect");
-      const opt = sel.options[sel.selectedIndex];
-      const name = opt?.dataset?.name || "";
-      const row = document.getElementById("subdomainRow");
-      const base = document.getElementById("subdomainBase");
-      const preview = document.getElementById("domainPreview");
-
-      if (!sel.value || !name) {
-        row.classList.remove("visible");
-        preview.innerHTML = "";
-        return;
-      }
-      base.textContent = name;
-      row.classList.add("visible");
-      updatePreview();
-    }
-
-    function updatePreview() {
-      const sel = document.getElementById("domainSelect");
-      const opt = sel.options[sel.selectedIndex];
-      const rootDomain = opt?.dataset?.name || "";
-      if (!rootDomain) return;
-      const sub = document.getElementById("subdomainInput").value.trim();
-      const full = sub ? `${sub}.${rootDomain}` : rootDomain;
-      document.getElementById("domainPreview").innerHTML =
-        `최종 주소: <b>https://${esc(full)}</b>`;
-    }
-
-    // ── 사이트 생성 ───────────────────────────────────────────────────────
-    async function createSite() {
-      const siteName = document.getElementById("siteName").value.trim();
-      const sel = document.getElementById("domainSelect");
-      const opt = sel.options[sel.selectedIndex];
-      const rootDomain = opt?.dataset?.name || "";
-      const zoneId = sel.value;
-      const sub = document.getElementById("subdomainInput").value.trim();
-      const customDomain = (zoneId && rootDomain)
-        ? (sub ? `${sub}.${rootDomain}` : rootDomain)
-        : null;
-
-      const errEl = document.getElementById("createError");
-      errEl.style.display = "none";
-
-      if (!siteName) {
-        errEl.textContent = "사이트 이름을 입력해주세요.";
-        errEl.style.display = "";
-        return;
-      }
-
-      const btn = document.getElementById("createBtn");
-      btn.disabled = true;
-      btn.textContent = "추가 중…";
-
-      try {
-        // 1) 사이트 레코드 생성
-        const site = await wpspot.api("/api/sites", {
-          method: "POST",
-          body: JSON.stringify({ siteName }),
-        });
-
-        // 2) 도메인 선택된 경우 → 프로비저닝 자동 실행
-        if (customDomain && site.id) {
-          btn.textContent = "프로비저닝 중…";
-          try {
-            await wpspot.api(`/api/sites/${site.id}/provision`, {
-              method: "POST",
-              body: JSON.stringify({ customDomain, zoneId }),
-            });
-            wpspot.toast("프로비저닝 시작! GitHub Actions가 WordPress를 설치하고 있어요 (~3~5분)");
-          } catch (pe) {
-            wpspot.toast(`사이트 추가 완료, 프로비저닝 실패: ${pe.message}`);
-          }
-        } else {
-          wpspot.toast("사이트가 추가됐어요. 호스팅 관리에서 도메인을 연결해주세요.");
-        }
-
-        // 폼 초기화
-        document.getElementById("siteName").value = "";
-        sel.value = "";
-        document.getElementById("subdomainInput").value = "";
-        document.getElementById("subdomainRow").classList.remove("visible");
-        document.getElementById("domainPreview").innerHTML = "";
-        loadSites();
-      } catch (e) {
-        errEl.textContent = e.message;
-        errEl.style.display = "";
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "사이트 추가";
-      }
-    }
-
-    // ── 사이트 목록 + 폴링 ───────────────────────────────────────────────
-    let _pollTimer = null;
-
-    async function loadSites() {
-      const el = document.getElementById("siteList");
-      try {
-        const data = await wpspot.api("/api/sites");
-        const sites = data.sites || [];
-        renderKpis(sites);
-        if (!sites.length) {
-          el.innerHTML = `<div class="empty" style="padding:var(--space-8);">아직 사이트가 없어요.<br/>위에서 첫 사이트를 추가해보세요.</div>`;
-          stopPolling();
-          return;
-        }
-        el.innerHTML = sites.map(renderSite).join("");
-
-        // 프로비저닝 중인 사이트가 있으면 10초마다 자동 갱신
-        if (sites.some(s => s.status === "provisioning")) {
-          startPolling();
-        } else {
-          stopPolling();
-        }
-      } catch (e) {
-        el.innerHTML = `<div class="empty" style="padding:var(--space-8);">${esc(e.message)}</div>`;
-        stopPolling();
-      }
-    }
-
-    function startPolling() {
-      if (_pollTimer) return;
-      _pollTimer = setInterval(async () => {
-        const data = await wpspot.api("/api/sites").catch(() => null);
-        if (!data) return;
-        const sites = data.sites || [];
-        renderKpis(sites);
-        document.getElementById("siteList").innerHTML = sites.length
-          ? sites.map(renderSite).join("")
-          : `<div class="empty" style="padding:var(--space-8);">아직 사이트가 없어요.<br/>위에서 첫 사이트를 추가해보세요.</div>`;
-        if (!sites.some(s => s.status === "provisioning")) stopPolling();
-      }, 10000);
-    }
-
-    function stopPolling() {
-      if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
-    }
-
-    function renderSite(site) {
-      const domain = site.custom_domain;
-      const siteUrl = domain ? `https://${domain}` : site.cf_worker_url;
-      const subLabel = domain || site.github_repo || "프로비저닝 전";
-
-      return `
-        <div class="entity-card">
-          <div class="entity-card__top">
-            <div>
-              <div class="entity-card__title">${esc(site.site_name)}</div>
-              <div class="entity-card__meta">
-                ${siteUrl
-                  ? `<a href="${esc(siteUrl)}" target="_blank" style="color:var(--text-brand);">${esc(subLabel)}</a>`
-                  : esc(subLabel)}
-              </div>
-            </div>
-            ${wpspot.statusBadge(site.status)}
-          </div>
-          <div class="row" style="flex-wrap:wrap;">
-            <a class="btn btn--secondary btn--s" href="/instance-detail.html?site=${esc(site.id)}">호스팅 관리</a>
-            ${siteUrl
-              ? `<a class="btn btn--secondary btn--s" href="${esc(siteUrl)}/wp-admin" target="_blank">WP 관리자</a>`
-              : ""}
-            <a class="btn btn--secondary btn--s" href="/file-manager.html?site=${esc(site.id)}">파일 관리자</a>
-            <button class="btn btn--danger btn--s"
-              onclick="deleteSite('${esc(site.id)}', '${esc(site.site_name)}')">삭제</button>
-          </div>
-        </div>
-      `;
-    }
-
-    async function deleteSite(siteId, siteName) {
-      if (!confirm(`'${siteName}' 사이트를 삭제할까요?\n연결된 GitHub 레포도 함께 삭제돼요.`)) return;
-      try {
-        await wpspot.api(`/api/sites/${siteId}`, { method: "DELETE" });
-        wpspot.toast("삭제됐어요.");
-        loadSites();
-      } catch (e) {
-        wpspot.toast(e.message, "error");
-      }
-    }
-
-    function esc(s) {
-      return String(s ?? "").replace(/[&<>"']/g, c =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-      );
-    }
-  </script>
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAuth();
+  wpspot.renderShell('dashboard', '대시보드');
+</script>
 </body>
 </html>
