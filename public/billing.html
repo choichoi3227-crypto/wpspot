@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>청구 내역 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div class="app-shell">
+  <div class="page-header">
+    <div class="page-breadcrumb">
+      <a href="/dashboard.html">wpspot</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>관리자 콘솔</span>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>청구 내역</span>
+    </div>
+  </div>
+
+  <!-- 요약 KPI -->
+  <div class="kpi-grid" style="margin-bottom:24px;">
+    <div class="kpi-card">
+      <div class="kpi-card__label"><span>이번 달 청구 예정</span></div>
+      <div class="kpi-card__value">$0</div>
+      <div class="kpi-card__sub">결제 예정일: 없음</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label"><span>미납 금액</span></div>
+      <div class="kpi-card__value" style="color:var(--fill-danger);">$0</div>
+      <div class="kpi-card__sub">7일 초과 시 자동 삭제</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-card__label"><span>총 결제 금액</span></div>
+      <div class="kpi-card__value">$0</div>
+      <div class="kpi-card__sub">누적 결제</div>
+    </div>
+  </div>
+
+  <!-- 필터 탭 -->
+  <div class="toolbar" style="margin-bottom:16px;">
+    <div class="tabs" style="margin-bottom:0;flex:0 0 auto;">
+      <button class="tab-btn tab-btn--active" onclick="filterStatus('all',this)">전체</button>
+      <button class="tab-btn" onclick="filterStatus('paid',this)">결제완료</button>
+      <button class="tab-btn" onclick="filterStatus('unpaid',this)">미납</button>
+      <button class="tab-btn" onclick="filterStatus('refund',this)">환불</button>
+    </div>
+    <div class="toolbar__spacer"></div>
+    <select class="field__select" style="width:auto;" onchange="filterYear(this.value)">
+      <option value="2026">2026년</option>
+      <option value="2025">2025년</option>
+    </select>
+  </div>
+
+  <div class="table-wrap">
+    <table id="billingTable">
+      <thead>
+        <tr>
+          <th>인보이스 번호</th>
+          <th>서비스</th>
+          <th>플랜</th>
+          <th>금액</th>
+          <th>상태</th>
+          <th>결제일</th>
+          <th>결제 수단</th>
+          <th>액션</th>
+        </tr>
+      </thead>
+      <tbody id="billingBody">
+        <tr>
+          <td colspan="8" style="text-align:center;color:var(--text-secondary);padding:40px;">
+            청구 내역이 없습니다.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 다운로드 -->
+  <div style="margin-top:16px;text-align:right;">
+    <button class="btn btn--outline btn--sm" onclick="exportCSV()">
+      📥 CSV 다운로드
+    </button>
+  </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAuth();
+  wpspot.renderShell('billing', '청구 내역');
+
+  let allInvoices = [];
+  let currentStatus = 'all';
+
+  function filterStatus(status, btn) {
+    currentStatus = status;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-btn--active'));
+    btn.classList.add('tab-btn--active');
+    renderTable();
+  }
+
+  function filterYear(year) { loadInvoices(year); }
+
+  function renderTable() {
+    const tbody = document.getElementById('billingBody');
+    const filtered = currentStatus === 'all' ? allInvoices : allInvoices.filter(i => i.status === currentStatus);
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:40px;">청구 내역이 없습니다.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = filtered.map(inv => `
+      <tr>
+        <td><span style="font-family:monospace;font-size:12px;">#${wpspot.escapeHtml(inv.id)}</span></td>
+        <td>${wpspot.escapeHtml(inv.service)}</td>
+        <td><span class="badge badge--blue">${wpspot.escapeHtml(inv.plan)}</span></td>
+        <td style="font-weight:700;">$${inv.amount}</td>
+        <td><span class="invoice-status-${inv.status}">${{paid:'결제완료',unpaid:'미납',refund:'환불'}[inv.status]||inv.status}</span></td>
+        <td>${wpspot.formatDate(inv.paid_at)}</td>
+        <td>PayPal</td>
+        <td>
+          <button class="btn btn--outline btn--sm" onclick="downloadInvoice('${inv.id}')">영수증</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  function loadInvoices(year) {
+    wpspot.api('/api/billing/invoices?year='+year).then(data => {
+      allInvoices = data?.invoices || [];
+      renderTable();
+    }).catch(() => { allInvoices = []; renderTable(); });
+  }
+
+  function downloadInvoice(id) {
+    wpspot.toast('영수증 다운로드 중...','info');
+  }
+
+  function exportCSV() {
+    wpspot.toast('CSV 다운로드를 준비 중입니다.','info');
+  }
+
+  loadInvoices(2026);
+</script>
+</body>
+</html>
