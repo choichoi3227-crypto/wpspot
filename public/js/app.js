@@ -21,6 +21,11 @@ const wpspot = (() => {
     if (!getToken()) { window.location.href = "/login.html"; return false; }
     return true;
   }
+  function requireAdmin() {
+    if (!requireAuth()) return false;
+    if (!getUser()?.isAdmin) { window.location.href = "/dashboard.html"; return false; }
+    return true;
+  }
 
   async function api(path, options = {}) {
     const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
@@ -166,7 +171,11 @@ const wpspot = (() => {
     const user = getUser();
     const initials = (user?.displayName || user?.email || "?").trim().slice(0, 1).toUpperCase();
 
-    const navHtml = NAV_ITEMS.map(item => `
+    const navItems = user?.isAdmin
+      ? [...NAV_ITEMS, { key: "admin-users", href: "/admin/users.html", icon: "shield", label: "관리자" }]
+      : NAV_ITEMS;
+
+    const navHtml = navItems.map(item => `
       <a class="wps-nav__item ${item.key === activeKey ? 'wps-nav__item--active' : ''}" href="${item.href}">
         ${icon(item.icon)}<span>${item.label}</span>
       </a>
@@ -254,7 +263,7 @@ const wpspot = (() => {
   }
 
   return {
-    getToken, getUser, setSession, clearSession, requireAuth,
+    getToken, getUser, setSession, clearSession, requireAuth, requireAdmin,
     api, toast, statusBadge, escapeHtml, copyText, formatDate, renderShell,
   };
 })();
