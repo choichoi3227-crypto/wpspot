@@ -50,13 +50,42 @@ CREATE TABLE IF NOT EXISTS site_jobs (
 
 CREATE TABLE IF NOT EXISTS site_credentials (
   site_id TEXT PRIMARY KEY,
-  pla_username TEXT NOT NULL DEFAULT 'admin',
-  pla_password_hash TEXT NOT NULL DEFAULT '',
-  pla_password_plain_enc TEXT,
+  pla_username TEXT NOT NULL DEFAULT 'admin', -- legacy alias for pma_username
+  pla_password_hash TEXT NOT NULL DEFAULT '', -- legacy alias for pma_password_hash
+  pla_password_plain_enc TEXT,                -- legacy alias for pma_password_plain_enc
+  pma_username TEXT NOT NULL DEFAULT 'admin',
+  pma_password_hash TEXT NOT NULL DEFAULT '',
+  pma_password_plain_enc TEXT,
   wp_admin_username TEXT,
   wp_admin_password_plain_enc TEXT,
-  db_path TEXT NOT NULL DEFAULT 'wp-content/database/wordpress.db',
+  db_path TEXT NOT NULL DEFAULT 'wordpress@127.0.0.1:3306',
+  db_engine TEXT NOT NULL DEFAULT 'MariaDB/MySQL',
+  db_host TEXT NOT NULL DEFAULT '127.0.0.1',
+  db_port TEXT NOT NULL DEFAULT '3306',
+  db_name TEXT NOT NULL DEFAULT 'wordpress',
+  db_username TEXT NOT NULL DEFAULT 'wpuser',
   nginx_status TEXT NOT NULL DEFAULT 'not_provisioned',
+  redis_enabled INTEGER NOT NULL DEFAULT 1,
+  redis_provider TEXT DEFAULT 'Redis 7 (로컬, 무료)',
+  stack TEXT DEFAULT 'nginx+php-fpm+mariadb+redis7',
+  php_fpm_main_port TEXT DEFAULT '9000',
+  php_fpm_sub_port TEXT DEFAULT '9001',
+  php_main_ports TEXT DEFAULT '8080',
+  php_sub_ports TEXT DEFAULT '8081',
+  php_active_ports TEXT DEFAULT '8080,8081',
+  nginx_wp_port TEXT DEFAULT '8080',
+  nginx_pma_port TEXT DEFAULT '8081',
+  db_backup_path TEXT DEFAULT 'wordpress/db-backup/latest.sql.gz',
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  FOREIGN KEY (site_id) REFERENCES sites(id)
+);
+
+
+CREATE TABLE IF NOT EXISTS pma_tokens (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
   FOREIGN KEY (site_id) REFERENCES sites(id)
 );
@@ -95,7 +124,7 @@ CREATE TABLE IF NOT EXISTS site_domain_bindings (
   FOREIGN KEY (site_id) REFERENCES sites(id)
 );
 
--- WordPress 데이터 테이블 (D1 저장, PHPLiteAdmin으로 관리)
+-- 레거시 D1 WordPress 호환 뷰 (실제 호스팅 DB는 MariaDB/MySQL + phpMyAdmin)
 CREATE TABLE IF NOT EXISTS wp_options (
   option_id INTEGER PRIMARY KEY AUTOINCREMENT,
   site_id TEXT NOT NULL,
@@ -247,6 +276,8 @@ CREATE TABLE IF NOT EXISTS wp_links (
 CREATE INDEX IF NOT EXISTS idx_sites_user        ON sites(user_id);
 CREATE INDEX IF NOT EXISTS idx_sites_slug        ON sites(site_slug);
 CREATE INDEX IF NOT EXISTS idx_jobs_site         ON site_jobs(site_id);
+CREATE INDEX IF NOT EXISTS idx_pma_token         ON pma_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_pma_site          ON pma_tokens(site_id);
 CREATE INDEX IF NOT EXISTS idx_pla_token         ON pla_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_pla_site          ON pla_tokens(site_id);
 CREATE INDEX IF NOT EXISTS idx_domains_user      ON site_domains(user_id);

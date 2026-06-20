@@ -1,5 +1,5 @@
 // src/crypto.js
-// 사용자가 입력한 GitHub Token, GCP Blogger OAuth Token, Cloudflare Global API Key를
+// 사용자가 입력한 GitHub Token, Cloudflare Global API Key / API Token를
 // D1에 평문으로 저장하지 않기 위한 AES-256-GCM 암복호화 유틸리티.
 // 마스터 키는 wrangler secret(CRED_ENC_KEY)으로 주입되며 base64 32바이트 문자열이어야 한다.
 

@@ -307,7 +307,7 @@
           </div>
           <div class="field-row">
             <span class="field-label">실행 엔진</span>
-            ${fv('PHP 8.3 내장 서버 (메인 2개 상시 실행 + 부하 시 자동 확장) · SQLite')}
+            ${fv('nginx + PHP-FPM 8.3 + MariaDB/MySQL + Redis 7')}
           </div>
           <div class="field-row">
             <span class="field-label">서버 상태</span>
@@ -356,36 +356,36 @@
     // ── 데이터베이스 탭 ──────────────────────────────────────────────────
     function renderDatabaseTab() {
       if (!credData?.provisioned) return `<div class="card"><div class="empty" style="padding:var(--space-6);">구성이 완료되면 표시돼요.</div></div>`;
-      const pla = credData.pla || {};
+      const pma = credData.pma || {};
       const customDomain = siteData.custom_domain;
       const pmaDomain = customDomain ? `pma.${customDomain}` : null;
-      const plaUrl = pla.url || (pmaDomain ? `https://${pmaDomain}` : null);
+      const pmaUrl = pma.url || (pmaDomain ? `https://${pmaDomain}` : null);
       return `
         <div class="card">
-          <div class="title-1">PHPLiteAdmin (DB 관리)</div>
-          <p class="body-2 mt-2">WordPress SQLite 데이터베이스를 직접 조회·수정할 수 있어요.</p>
-          ${plaUrl ? `
+          <div class="title-1">phpMyAdmin (DB 관리)</div>
+          <p class="body-2 mt-2">WordPress MariaDB/MySQL 데이터베이스를 직접 조회·수정할 수 있어요.</p>
+          ${pmaUrl ? `
             <div class="field-row" style="margin-top:var(--space-3);">
               <span class="field-label">접속 주소</span>
-              ${fvLink(plaUrl, plaUrl)}
-              <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(plaUrl)}')">복사</button>
-              <a class="btn btn--primary btn--s" href="${wpspot.escapeHtml(plaUrl)}" target="_blank">열기 ↗</a>
+              ${fvLink(pmaUrl, pmaUrl)}
+              <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(pmaUrl)}')">복사</button>
+              <a class="btn btn--primary btn--s" href="${wpspot.escapeHtml(pmaUrl)}" target="_blank">열기 ↗</a>
             </div>` : `
             <div class="field-row" style="margin-top:var(--space-3);">
               <span class="field-label">임시 접속</span>
-              <div class="field-value"><a href="${wpspot.escapeHtml(pla.fallbackUrl || '#')}">/phpliteadmin-lite (토큰 기반)</a></div>
-              <a class="btn btn--secondary btn--s" href="${wpspot.escapeHtml(pla.fallbackUrl || '#')}">열기</a>
+              <div class="field-value"><a href="${wpspot.escapeHtml(pma.fallbackUrl || '#')}">/phpmyadmin-lite (토큰 기반)</a></div>
+              <a class="btn btn--secondary btn--s" href="${wpspot.escapeHtml(pma.fallbackUrl || '#')}">열기</a>
             </div>
             <div class="notice-box warn mt-2">개인 도메인 연결 시 <code>pma.도메인</code>으로 정식 접속할 수 있어요.</div>`}
           <div class="field-row" style="margin-top:var(--space-3);">
             <span class="field-label">비밀번호</span>
-            <div class="field-value secret" id="plaPwField">••••••••</div>
-            <button class="btn btn--secondary btn--s" onclick="togglePw('plaPwField', ${JSON.stringify(pla.password || '')})">보기</button>
-            <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(pla.password || '')}')">복사</button>
+            <div class="field-value secret" id="pmaPwField">••••••••</div>
+            <button class="btn btn--secondary btn--s" onclick="togglePw('pmaPwField', ${JSON.stringify(pma.password || '')})">보기</button>
+            <button class="btn btn--secondary btn--s" onclick="wpspot.copyText('${wpspot.escapeHtml(pma.password || '')}')">복사</button>
           </div>
           <div class="field-row">
             <span class="field-label">DB 경로</span>
-            ${fv(pla.dbPath || 'wp-content/database/wordpress.db')}
+            ${fv(pma.dbPath || 'wordpress@127.0.0.1:3306')}
           </div>
           <div class="notice-box mt-2">직접 URL 접속은 차단돼요. 반드시 <code>pma.도메인</code>으로만 접근할 수 있고, 접속 토큰은 매일 자정(KST) 초기화돼요.</div>
         </div>
