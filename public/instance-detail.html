@@ -423,6 +423,10 @@
             <span class="field-label">DB 접속</span>
             ${fv(`${pma.dbUser || 'wpuser'}@${pma.dbHost || '127.0.0.1'}:${pma.dbPort || '3306'}/${pma.dbName || 'wordpress'}`)}
           </div>
+          <div class="field-row">
+            <span class="field-label">DB 경로</span>
+            ${fv(pma.dbPath || 'wordpress@127.0.0.1:3306')}
+          </div>
           <div class="notice-box mt-2">직접 URL 접속은 차단돼요. 반드시 <code>pma.도메인</code>으로만 접근할 수 있고, 접속 토큰은 매일 자정(KST) 초기화돼요.</div>
         </div>
       `;
