@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>플랜 선택 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <style>
+    .plan-checkout { max-width: 780px; margin: 0 auto; }
+    .billing-cycle { display:flex;gap:8px;align-items:center;margin-bottom:28px; }
+    .cycle-btn { padding:8px 20px;border-radius:999px;font-size:14px;font-weight:600;border:2px solid var(--border-secondary);background:#fff;color:var(--text-secondary);cursor:pointer;transition:all 120ms; }
+    .cycle-btn--active { border-color:var(--fill-brand);color:var(--fill-brand);background:var(--color-blue-50); }
+    .cycle-save { background:#D1FAE5;color:#065F46;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700; }
+  </style>
+</head>
+<body>
+<div class="app-shell">
+  <div class="page-header">
+    <div class="page-breadcrumb">
+      <a href="/dashboard.html">대시보드</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>플랜 선택</span>
+    </div>
+    <div class="page-title">워드프레스 호스팅 플랜</div>
+  </div>
+
+  <div class="plan-checkout">
+    <div style="text-align:center;margin-bottom:28px;">
+      <p style="font-size:15px;color:var(--text-secondary);">성능과 사양에 맞는 플랜을 선택하세요</p>
+      <div class="billing-cycle" style="justify-content:center;margin-top:16px;">
+        <button class="cycle-btn cycle-btn--active" onclick="setCycle('monthly',this)">월간 결제</button>
+        <button class="cycle-btn" onclick="setCycle('yearly',this)">연간 결제</button>
+        <span class="cycle-save">연간 2개월 무료</span>
+      </div>
+    </div>
+
+    <div class="plan-grid">
+      <!-- LIGHT -->
+      <div class="plan-card" onclick="selectPlan('light',this)">
+        <div class="plan-card__name">⚡ 라이트 플랜</div>
+        <div style="margin-top:12px;">
+          <span class="plan-card__price"><sup>$</sup><span id="price-light">10</span></span>
+          <span class="plan-card__period"> / 월</span>
+        </div>
+        <hr class="plan-card__divider" />
+        <div class="plan-card__features">
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> CPU 부하 최적화 기본 제공</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> WAF(웹방화벽) 기본 제공</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> Cloudflare CDN 적극 제공</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 트래픽 무제한</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> DB 무제한 (MySQL/MariaDB 선택)</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> SSL 자동 발급</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> Redis 오브젝트 캐시</div>
+        </div>
+        <button class="btn btn--outline btn--full" style="margin-top:20px;" onclick="event.stopPropagation();goPay('light')">라이트 시작하기</button>
+      </div>
+
+      <!-- STANDARD -->
+      <div class="plan-card plan-card--popular" onclick="selectPlan('standard',this)">
+        <div class="plan-card__badge">인기</div>
+        <div class="plan-card__name">🚀 스탠다드 플랜</div>
+        <div style="margin-top:12px;">
+          <span class="plan-card__price"><sup>$</sup><span id="price-standard">27</span></span>
+          <span class="plan-card__period"> / 월</span>
+        </div>
+        <hr class="plan-card__divider" />
+        <div class="plan-card__features">
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> <strong>라이트 플랜 전체 포함</strong></div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> PHP-FPM 서버 기본 2대</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 서브 PHP 서버 4대 추가 제공</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 멀티 풀 로드 분산</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> OPcache 256MB</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 우선 기술 지원</div>
+        </div>
+        <button class="btn btn--primary btn--full" style="margin-top:20px;" onclick="event.stopPropagation();goPay('standard')">스탠다드 시작하기</button>
+      </div>
+
+      <!-- SMART -->
+      <div class="plan-card" onclick="selectPlan('smart',this)">
+        <div class="plan-card__name">🏆 스마트 플랜</div>
+        <div style="margin-top:12px;">
+          <span class="plan-card__price"><sup>$</sup><span id="price-smart">42</span></span>
+          <span class="plan-card__period"> / 월</span>
+        </div>
+        <hr class="plan-card__divider" />
+        <div class="plan-card__features">
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> <strong>스탠다드 플랜 전체 포함</strong></div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> PHP-FPM 서버 기본 2대</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 서브 PHP 서버 8대 제공</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 자체 로드 밸런싱 제공</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> OPcache 512MB</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 전담 기술 매니저</div>
+          <div class="plan-card__feature"><span class="plan-card__feature-icon">✓</span> 고급 성능 모니터링</div>
+        </div>
+        <button class="btn btn--outline btn--full" style="margin-top:20px;" onclick="event.stopPropagation();goPay('smart')">스마트 시작하기</button>
+      </div>
+    </div>
+
+    <!-- 결제 수단 선택 -->
+    <div class="card mt-6" id="paySection" style="display:none;">
+      <div class="card-title" style="margin-bottom:16px;">결제 수단 선택</div>
+      <div class="payment-method-card payment-method-card--selected">
+        <div class="payment-method-card__logo">
+          <svg width="32" height="20" viewBox="0 0 32 20" fill="none"><text x="2" y="15" fill="#fff" font-size="11" font-weight="800" font-family="Arial">Pay</text><text x="16" y="15" fill="#009cde" font-size="11" font-weight="800" font-family="Arial">Pal</text></svg>
+        </div>
+        <div class="payment-method-card__info">
+          <div class="payment-method-card__name">PayPal</div>
+          <div class="payment-method-card__email">PayPal 계정으로 안전하게 결제</div>
+        </div>
+        <div class="payment-method-card__check">✓</div>
+      </div>
+      <div id="payError" style="color:var(--fill-danger);font-size:13px;margin-top:10px;display:none;"></div>
+      <button class="btn btn--primary btn--full" style="margin-top:20px;" id="payBtn" onclick="doCheckout()">
+        PayPal로 결제하기
+      </button>
+      <div style="font-size:12px;color:var(--text-secondary);text-align:center;margin-top:10px;">
+        PayPal 계정이 없으신가요? PayPal 결제 시 신용카드로도 결제 가능합니다.
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAuth();
+  wpspot.renderShell('hosting', '플랜 선택');
+
+  const PRICES = { light:[10,8], standard:[27,22], smart:[42,35] };
+  let cycle = 'monthly', selectedPlan = null;
+
+  function setCycle(c, btn) {
+    cycle = c;
+    document.querySelectorAll('.cycle-btn').forEach(b => b.classList.remove('cycle-btn--active'));
+    btn.classList.add('cycle-btn--active');
+    for(const [k,v] of Object.entries(PRICES)) {
+      document.getElementById('price-'+k).textContent = c==='yearly' ? v[1] : v[0];
+    }
+  }
+
+  function selectPlan(plan, card) {
+    document.querySelectorAll('.plan-card').forEach(c => c.classList.remove('plan-card--selected'));
+    card.classList.add('plan-card--selected');
+    selectedPlan = plan;
+    document.getElementById('paySection').style.display = 'block';
+  }
+
+  function goPay(plan) {
+    selectedPlan = plan;
+    document.querySelectorAll('.plan-card').forEach(c => c.classList.remove('plan-card--selected'));
+    event.target.closest('.plan-card').classList.add('plan-card--selected');
+    document.getElementById('paySection').style.display = 'block';
+    document.getElementById('paySection').scrollIntoView({behavior:'smooth'});
+  }
+
+  function doCheckout() {
+    if (!selectedPlan) return;
+    const btn = document.getElementById('payBtn');
+    btn.disabled = true; btn.textContent = '처리 중...';
+    // PayPal 결제 연동 (실제 구현 시 PayPal SDK 호출)
+    setTimeout(() => {
+      window.location.href = '/checkout.html?plan='+selectedPlan+'&cycle='+cycle;
+    }, 800);
+  }
+</script>
+</body>
+</html>
