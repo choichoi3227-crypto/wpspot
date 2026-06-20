@@ -1,0 +1,135 @@
+/* public/css/marketing.css — wpspot 마케팅 페이지 공용 스타일 */
+
+body {
+  background:
+    radial-gradient(circle at 20% 10%, #dbeafe 0, transparent 28%),
+    radial-gradient(circle at 80% 0%,  #f5d0fe 0, transparent 25%),
+    #f8fafc;
+}
+
+/* ── 레이아웃 ── */
+.mkt {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* ── 네비게이션 ── */
+.mkt-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px;
+  margin-bottom: 36px;
+  background: rgba(255,255,255,.75);
+  border: 1px solid rgba(148,163,184,.25);
+  border-radius: 999px;
+  backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(15,23,42,.08);
+}
+.mkt-nav a {
+  color: #334155;
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  transition: background 120ms, color 120ms;
+}
+.mkt-nav a:hover       { background: #eef2ff; color: #2563eb; }
+.mkt-nav__login        { margin-left: auto; background: #fff; border: 1px solid #e2e8f0; }
+.mkt-nav__cta          { background: linear-gradient(135deg,#2563eb,#a855f7); color: #fff !important; box-shadow: 0 12px 30px rgba(37,99,235,.28); }
+.mkt-nav__cta:hover    { filter: brightness(1.06); background: linear-gradient(135deg,#2563eb,#a855f7) !important; }
+
+/* ── 히어로 ── */
+.mkt-hero {
+  display: grid;
+  grid-template-columns: 1.15fr .85fr;
+  gap: 32px;
+  align-items: center;
+  padding: 48px 0;
+}
+.mkt-eyebrow {
+  display: inline-flex;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 800;
+  font-size: 13px;
+  margin-bottom: 18px;
+}
+.mkt-hero h1 {
+  font-size: clamp(42px, 7vw, 78px);
+  line-height: .95;
+  letter-spacing: -.06em;
+  margin: 0 0 20px;
+  color: #0f172a;
+}
+.mkt-hero p {
+  font-size: 19px;
+  line-height: 1.75;
+  color: #475569;
+  margin: 0 0 26px;
+}
+.mkt-hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+
+/* ── 스택 카드 (히어로 우측) ── */
+.mkt-stack-card {
+  background: rgba(255,255,255,.88);
+  border: 1px solid rgba(148,163,184,.28);
+  border-radius: 32px;
+  padding: 26px;
+  box-shadow: 0 24px 80px rgba(15,23,42,.12);
+}
+.mkt-stack-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid #e2e8f0;
+  color: #334155;
+  font-weight: 700;
+  font-size: 14px;
+}
+.mkt-stack-row:last-child { border-bottom: 0; }
+
+/* ── 그리드 ── */
+.mkt-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+  gap: 18px;
+  margin: 28px 0;
+}
+.mkt-panel {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 26px;
+  padding: 24px;
+  box-shadow: 0 12px 40px rgba(15,23,42,.06);
+}
+.mkt-panel h3 { margin: 0 0 10px; font-size: 20px; color: #0f172a; }
+.mkt-panel p,
+.mkt-panel li { color: #64748b; line-height: 1.7; margin: 0; }
+.mkt-panel ul  { padding-left: 20px; margin: 0; }
+
+.mkt-wide { grid-column: span 2; }
+
+/* ── 섹션 타이틀 ── */
+.mkt-section-title {
+  font-size: 36px;
+  letter-spacing: -.04em;
+  margin: 56px 0 18px;
+  color: #0f172a;
+  font-weight: 700;
+}
+
+/* ── 반응형 ── */
+@media (max-width: 860px) {
+  .mkt-hero  { grid-template-columns: 1fr; }
+  .mkt-grid  { grid-template-columns: 1fr; }
+  .mkt-wide  { grid-column: auto; }
+  .mkt-nav__login { margin-left: 0; }
+}
