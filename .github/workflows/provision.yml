@@ -646,6 +646,27 @@ jobs:
             async fetch(request, env) {
               const origin = env.TUNNEL_ORIGIN;
               if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto','https');
+              h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual'
+                });
+                const out = new Headers(r.headers);
+                out.set('x-powered-by','wpspot/nginx+php-fpm');
+                return new Response(r.body, {status:r.status, headers:out});
+              } catch(e) {
+                return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+              }
+            }
+          };
               const id = env.GOVERNOR.idFromName('main');
               return env.GOVERNOR.get(id).fetch(request);
             }
@@ -742,6 +763,7 @@ jobs:
           PYEOF
             python3 -c "
           name='${NAME}'; host='${TUNNEL_HOST}'
+          toml='name=\"'+name+'\"\nmain=\"worker.js\"\ncompatibility_date=\"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN=\"https://'+host+'\"\n'
           toml = ('name=\"'+name+'\"\n'
                   'main=\"worker.js\"\n'
                   'compatibility_date=\"2024-09-23\"\n'

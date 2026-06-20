@@ -887,6 +887,53 @@ async function handleApi(request, env, url) {
     });
   }
 
+  const credUpdateMatch = pathname.match(/^\/api\/sites\/([^/]+)\/credentials$/);
+  if (credUpdateMatch && method === "PUT") {
+    const siteId = credUpdateMatch[1];
+    const site = await env.DB.prepare(
+      "SELECT * FROM sites WHERE id=? AND user_id=?"
+    ).bind(siteId, userId).first();
+    if (!site) return err("사이트를 찾을 수 없습니다.", 404);
+
+    const body = await request.json().catch(() => ({}));
+    const sets = [];
+    const binds = [];
+
+    const wpUsername = String(body.wpUsername || "").trim();
+    const wpPassword = String(body.wpPassword || "");
+    const pmaUsername = String(body.pmaUsername || "").trim();
+    const pmaPassword = String(body.pmaPassword || "");
+
+    if (wpUsername) { sets.push("wp_admin_username=?"); binds.push(wpUsername); }
+    if (wpPassword) { sets.push("wp_admin_password_plain_enc=?"); binds.push(await encryptSecret(env, wpPassword)); }
+    if (pmaUsername) {
+      sets.push("pma_username=?", "pla_username=?");
+      binds.push(pmaUsername, pmaUsername);
+    }
+    if (pmaPassword) {
+      const pmaHash = await hashPassword(pmaPassword);
+      const pmaEnc = await encryptSecret(env, pmaPassword);
+      sets.push("pma_password_hash=?", "pma_password_plain_enc=?", "pla_password_hash=?", "pla_password_plain_enc=?");
+      binds.push(pmaHash, pmaEnc, pmaHash, pmaEnc);
+    }
+
+    if (!sets.length) return err("변경할 관리자 정보를 입력해주세요.");
+
+    const existing = await env.DB.prepare("SELECT site_id FROM site_credentials WHERE site_id=?").bind(siteId).first();
+    if (!existing) {
+      await env.DB.prepare(
+        `INSERT INTO site_credentials
+         (site_id,pma_username,pla_username,pma_password_hash,pla_password_hash,db_path,db_engine,db_host,db_port,db_name,db_username,nginx_status)
+         VALUES (?, 'admin', 'admin', '', '', 'wordpress@127.0.0.1:3306', 'MariaDB/MySQL', '127.0.0.1', '3306', 'wordpress', 'wpuser', 'not_provisioned')`
+      ).bind(siteId).run();
+    }
+
+    await env.DB.prepare(`UPDATE site_credentials SET ${sets.join(",")} WHERE site_id=?`).bind(...binds, siteId).run();
+    await env.DB.prepare("DELETE FROM pma_tokens WHERE site_id=?").bind(siteId).run().catch(() => {});
+    await env.DB.prepare("DELETE FROM pla_tokens WHERE site_id=?").bind(siteId).run().catch(() => {});
+    return json({ ok: true, message: "관리자 정보가 업데이트됐어요." });
+  }
+
   // ── phpMyAdmin Lite 데이터 (D1 호환 뷰, 실 DB는 MariaDB/MySQL) ─────────────
 
   if ((pathname === "/api/pma/tables" || pathname === "/api/pla/tables") && method === "GET") {

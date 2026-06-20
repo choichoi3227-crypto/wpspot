@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>호스팅 관리 — wpspot</title>
+  <meta http-equiv="refresh" content="0; url=/instance-detail.html" />
+  <script>
+    const qs = location.search || "";
+    location.replace(`/instance-detail.html${qs}`);
   <link rel="stylesheet" href="/css/style.css" />
   <style>
     .info-card {
@@ -658,5 +662,9 @@
       if (e.target === document.getElementById("domainModal")) closeModal();
     });
   </script>
+</head>
+<body>
+  <p>호스팅 관리 화면이 인스턴스 상세 화면으로 통합됐어요. <a id="link" href="/instance-detail.html">이동하기</a></p>
+  <script>document.getElementById("link").href = `/instance-detail.html${location.search || ""}`;</script>
 </body>
 </html>
