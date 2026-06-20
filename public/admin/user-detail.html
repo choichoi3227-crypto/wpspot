@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>사용자 상세 — wpspot 관리자</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div class="admin-banner">
+  관리자 전용 영역
+</div>
+<div class="app-shell">
+  <div class="page-header">
+    <div class="page-breadcrumb">
+      <a href="/dashboard.html">wpspot</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <a href="/admin/users.html">관리자</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>사용자 상세</span>
+    </div>
+  </div>
+
+  <div id="userDetailArea">
+    <div class="card" style="text-align:center;padding:40px;color:var(--text-secondary);">불러오는 중…</div>
+  </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAdmin();
+  wpspot.renderShell('admin-users', '사용자 상세');
+
+  function getUserId() { return new URLSearchParams(location.search).get('id') || ''; }
+
+  const PLAN_LABEL = { light: '⚡ 라이트', standard: '🚀 스탠다드', smart: '🏆 스마트' };
+
+  function statusBadgeHtml(status) {
+    const map = { pending: ['badge--pending', '준비 중'], active: ['badge--green', '활성'], error: ['badge--error', '오류'] };
+    const [cls, label] = map[status] || ['badge--grey', status || '—'];
+    return `<span class="badge ${cls}">${label}</span>`;
+  }
+
+  function render(data) {
+    const u = data.user;
+    const sites = data.sites || [];
+    document.getElementById('userDetailArea').innerHTML = `
+      <div class="grid-2" style="gap:20px;">
+        <div class="card">
+          <div class="card-title" style="margin-bottom:16px;">계정 정보</div>
+          <div class="field-row"><span class="field-label">이메일</span><span class="field-value">${wpspot.escapeHtml(u.email)}</span></div>
+          <div class="field-row"><span class="field-label">이름</span><span class="field-value">${wpspot.escapeHtml(u.name || '—')}</span></div>
+          <div class="field-row"><span class="field-label">가입일</span><span class="field-value">${wpspot.formatDate(u.created_at)}</span></div>
+          <div class="field-row"><span class="field-label">상태</span><span class="field-value">${u.active ? '<span class="badge badge--green">활성</span>' : '<span class="badge badge--grey">정지됨</span>'}</span></div>
+          <div class="field-row"><span class="field-label">호스팅 수</span><span class="field-value">${sites.length}개</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="margin-bottom:16px;">관리자 제어</div>
+          <div class="field">
+            <label class="field__label">플랜</label>
+            <select class="field__select" id="planSelect">
+              ${Object.entries(PLAN_LABEL).map(([k, v]) => `<option value="${k}" ${u.plan === k ? 'selected' : ''}>${v}</option>`).join('')}
+            </select>
+          </div>
+          <div class="btn-row" style="margin-top:12px;">
+            <button class="btn btn--primary btn--sm" onclick="savePlan()">플랜 적용</button>
+            <button class="btn ${u.active ? 'btn--danger' : 'btn--success'} btn--sm" onclick="toggleActive(${u.active})">${u.active ? '계정 정지' : '계정 활성화'}</button>
+            <button class="btn ${u.is_admin ? 'btn--outline' : 'btn--secondary'} btn--sm" onclick="toggleAdmin(${u.is_admin})">${u.is_admin ? '관리자 권한 해제' : '관리자로 지정'}</button>
+          </div>
+          <div class="notice-box info" style="margin-top:12px;font-size:13px;">
+            ℹ️ 관리자로 지정하면 이 사용자는 플랜 제한 없이 모든 플랜의 기능을 무제한으로 이용할 수 있어요.
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px;">
+        <div class="card-title" style="margin-bottom:16px;">보유 호스팅 (${sites.length})</div>
+        ${sites.length ? `
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>이름</th><th>플랜</th><th>상태</th><th>생성일</th></tr></thead>
+              <tbody>
+                ${sites.map(s => `
+                  <tr>
+                    <td>${wpspot.escapeHtml(s.site_name)}</td>
+                    <td>${PLAN_LABEL[s.plan] || s.plan || '—'}</td>
+                    <td>${statusBadgeHtml(s.status)}</td>
+                    <td style="font-size:12px;">${wpspot.formatDate(s.created_at)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        ` : `<p style="color:var(--text-secondary);font-size:14px;">아직 생성한 호스팅이 없어요.</p>`}
+      </div>
+    `;
+  }
+
+  function savePlan() {
+    const plan = document.getElementById('planSelect').value;
+    wpspot.api('/api/admin/users/'+getUserId(), { method:'PATCH', body: JSON.stringify({ plan }) })
+      .then(() => { wpspot.toast('플랜을 변경했어요.', 'success'); load(); })
+      .catch(e => wpspot.toast(e.message, 'error'));
+  }
+
+  function toggleActive(current) {
+    const next = !current;
+    if (!confirm(next ? '계정을 활성화할까요?' : '계정을 정지할까요?')) return;
+    wpspot.api('/api/admin/users/'+getUserId(), { method:'PATCH', body: JSON.stringify({ active: next }) })
+      .then(() => { wpspot.toast('상태를 변경했어요.', 'success'); load(); })
+      .catch(e => wpspot.toast(e.message, 'error'));
+  }
+
+  function toggleAdmin(current) {
+    const next = !current;
+    if (!confirm(next ? '관리자 권한을 부여할까요? (모든 플랜 무제한 이용 가능)' : '관리자 권한을 해제할까요?')) return;
+    wpspot.api('/api/admin/users/'+getUserId(), { method:'PATCH', body: JSON.stringify({ isAdmin: next }) })
+      .then(() => { wpspot.toast('권한을 변경했어요.', 'success'); load(); })
+      .catch(e => wpspot.toast(e.message, 'error'));
+  }
+
+  function load() {
+    wpspot.api('/api/admin/users/'+getUserId())
+      .then(render)
+      .catch(e => {
+        document.getElementById('userDetailArea').innerHTML =
+          `<div class="card" style="text-align:center;padding:40px;color:var(--text-secondary);">${wpspot.escapeHtml(e.message)}</div>`;
+      });
+  }
+
+  if (getUserId()) load();
+</script>
+</body>
+</html>
