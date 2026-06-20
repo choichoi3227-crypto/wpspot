@@ -9,14 +9,18 @@
 <body>
   <div class="app-shell">
     <div class="top-bar">
-      <span class="top-bar__title">회원가입</span>
+      <span class="top-bar__title">호스팅의 혁신 시작하기</span>
       <a href="/" class="btn btn--ghost btn--s">처음으로</a>
     </div>
 
     <div class="screen">
-      <h1 class="h1 mt-6">wpspot 시작을<br/>위한 정보예요</h1>
+      <div class="card" style="background:linear-gradient(135deg,#eff6ff,#faf5ff);border:1px solid #dbeafe;margin-top:var(--space-5);">
+        <div class="caption" style="color:var(--text-brand);font-weight:800;">호스팅의 혁신</div>
+        <h1 class="h1 mt-2">계정 생성 후<br/>기본 정보를 세팅해요</h1>
+        <p class="body-2 mt-2">가입 후 GitHub Token과 Cloudflare 정보를 등록하면 WordPress + MariaDB/MySQL + phpMyAdmin 호스팅을 만들 수 있어요.</p>
+      </div>
 
-      <form id="signupForm" class="mt-6">
+      <form id="signupForm" class="mt-6 card">
         <div class="field">
           <label class="field__label" for="displayName">이름 (선택)</label>
           <input class="field__input" type="text" id="displayName" name="displayName" placeholder="홍길동" />
