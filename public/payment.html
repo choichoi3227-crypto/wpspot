@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>결제 수단 관리 — wpspot</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div class="app-shell">
+  <div class="page-header">
+    <div class="page-breadcrumb">
+      <a href="/dashboard.html">wpspot</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>관리자 콘솔</span>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>결제 수단 관리</span>
+    </div>
+  </div>
+
+  <div class="grid-2" style="gap:24px;align-items:start;">
+    <!-- 등록된 결제 수단 -->
+    <div>
+      <div class="section-hd"><div class="section-hd__title">등록된 결제 수단</div></div>
+      <div id="paymentMethods" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="empty-card">
+          <div class="empty-card__icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+          </div>
+          <div>
+            <div class="empty-card__text">등록된 결제 수단이 없습니다</div>
+            <div class="empty-card__sub">PayPal 계정을 추가해 주세요.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 결제 수단 추가 -->
+    <div class="card">
+      <div class="card-title">결제 수단 추가</div>
+      <div class="card-subtitle" style="margin-bottom:20px;">현재 지원 결제 수단: PayPal</div>
+
+      <div style="background:#003087;border-radius:12px;padding:18px 20px;margin-bottom:20px;display:flex;align-items:center;gap:12px;">
+        <svg width="40" height="25" viewBox="0 0 80 50" fill="none">
+          <text x="2" y="32" fill="#fff" font-size="22" font-weight="900" font-family="Arial">Pay</text>
+          <text x="40" y="32" fill="#009cde" font-size="22" font-weight="900" font-family="Arial">Pal</text>
+        </svg>
+        <div>
+          <div style="color:#fff;font-size:15px;font-weight:700;">PayPal</div>
+          <div style="color:#90cdf4;font-size:13px;">안전한 온라인 결제</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field__label">PayPal 이메일 주소</label>
+        <input type="email" class="field__input" id="ppEmail" placeholder="paypal@example.com" />
+        <div class="field__help">PayPal 계정에 등록된 이메일 주소를 입력해 주세요.</div>
+      </div>
+      <div id="ppError" style="color:var(--fill-danger);font-size:13px;margin-bottom:12px;display:none;"></div>
+      <button class="btn btn--primary btn--full" onclick="addPaypal()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        PayPal 연결하기
+      </button>
+
+      <div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;padding:14px;margin-top:16px;">
+        <div style="font-size:13px;font-weight:600;color:#92400E;margin-bottom:4px;">💡 안내</div>
+        <div style="font-size:13px;color:#78350F;line-height:1.6;">
+          결제 수단을 추가하면 매월 자동으로 플랜 요금이 청구됩니다.<br />
+          언제든지 결제 수단을 변경하거나 삭제할 수 있습니다.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 자동결제 설정 -->
+  <div class="card mt-6" style="margin-top:24px;">
+    <div class="card-title" style="margin-bottom:16px;">자동결제 설정</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--border-secondary);">
+      <div>
+        <div style="font-size:14px;font-weight:600;">자동결제 활성화</div>
+        <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">매월 갱신일에 자동으로 결제됩니다</div>
+      </div>
+      <label style="position:relative;display:inline-block;width:44px;height:24px;">
+        <input type="checkbox" id="autoPayToggle" style="opacity:0;width:0;height:0;" checked onchange="toggleAutoPay()" />
+        <span id="autoPaySlider" style="position:absolute;cursor:pointer;inset:0;background:#2563EB;border-radius:999px;transition:background 200ms;">
+          <span style="position:absolute;left:2px;top:2px;width:20px;height:20px;background:#fff;border-radius:50%;transition:transform 200ms;transform:translateX(20px);display:block;"></span>
+        </span>
+      </label>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 0;">
+      <div>
+        <div style="font-size:14px;font-weight:600;">결제 실패 알림</div>
+        <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">결제 실패 시 이메일로 알림을 받습니다</div>
+      </div>
+      <label style="position:relative;display:inline-block;width:44px;height:24px;">
+        <input type="checkbox" checked style="opacity:0;width:0;height:0;" />
+        <span style="position:absolute;cursor:pointer;inset:0;background:#2563EB;border-radius:999px;">
+          <span style="position:absolute;left:2px;top:2px;width:20px;height:20px;background:#fff;border-radius:50%;transform:translateX(20px);display:block;"></span>
+        </span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAuth();
+  wpspot.renderShell('payment', '결제 수단 관리');
+
+  function addPaypal() {
+    const email = document.getElementById('ppEmail').value.trim();
+    const err = document.getElementById('ppError');
+    err.style.display = 'none';
+    if (!email || !email.includes('@')) {
+      err.textContent = '유효한 PayPal 이메일 주소를 입력해 주세요.';
+      err.style.display = 'block'; return;
+    }
+    wpspot.api('/api/payment/paypal', {method:'POST', body:JSON.stringify({email})})
+      .then(() => { wpspot.toast('PayPal 계정이 연결되었습니다.','success'); loadMethods(); })
+      .catch(e => { err.textContent = e.message; err.style.display='block'; });
+  }
+
+  function toggleAutoPay() {
+    const on = document.getElementById('autoPayToggle').checked;
+    wpspot.toast(on ? '자동결제가 활성화되었습니다.' : '자동결제가 비활성화되었습니다.', 'success');
+  }
+
+  function loadMethods() {
+    wpspot.api('/api/payment/methods').then(data => {
+      if(!data || !data.methods?.length) return;
+      const el = document.getElementById('paymentMethods');
+      el.innerHTML = data.methods.map(m => `
+        <div class="payment-method-card">
+          <div class="payment-method-card__logo">
+            <svg width="32" height="20" viewBox="0 0 80 50"><text x="2" y="32" fill="#fff" font-size="22" font-weight="900" font-family="Arial">Pay</text><text x="40" y="32" fill="#009cde" font-size="22" font-weight="900" font-family="Arial">Pal</text></svg>
+          </div>
+          <div class="payment-method-card__info">
+            <div class="payment-method-card__name">PayPal</div>
+            <div class="payment-method-card__email">${wpspot.escapeHtml(m.email)}</div>
+          </div>
+          ${m.default ? '<div class="payment-method-card__check">✓ 기본</div>' : ''}
+          <button class="btn btn--outline btn--sm" onclick="removeMethod('${m.id}')">삭제</button>
+        </div>
+      `).join('');
+    }).catch(()=>{});
+  }
+
+  loadMethods();
+</script>
+</body>
+</html>
