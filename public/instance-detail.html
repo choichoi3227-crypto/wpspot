@@ -151,36 +151,10 @@
     </div>
   </div>
 
-  <!-- DB 탭 -->
+  <!-- DB 탭: WordPress 관리자 정보 + DB(phpMyAdmin) 관리자 정보 -->
   <div id="tab-db" style="display:none;">
-    <div class="card">
-      <div class="card-title" style="margin-bottom:16px;">데이터베이스 정보</div>
-      <div class="field">
-        <label class="field__label">DB 종류</label>
-        <select class="field__select" id="dbTypeSelect">
-          <option value="mariadb">MariaDB (권장)</option>
-          <option value="mysql">MySQL</option>
-        </select>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-        <div class="field">
-          <label class="field__label">호스트</label>
-          <input class="field__input" value="127.0.0.1" readonly />
-        </div>
-        <div class="field">
-          <label class="field__label">포트</label>
-          <input class="field__input" value="3306" readonly />
-        </div>
-        <div class="field">
-          <label class="field__label">DB 이름</label>
-          <input class="field__input" value="wordpress" readonly />
-        </div>
-        <div class="field">
-          <label class="field__label">사용자</label>
-          <input class="field__input" value="wpuser" readonly />
-        </div>
-      </div>
-      <button class="btn btn--outline btn--sm" onclick="openPma()">phpMyAdmin 열기</button>
+    <div id="credInfoArea">
+      <div class="card" style="text-align:center;padding:40px;color:var(--text-secondary);">불러오는 중…</div>
     </div>
   </div>
 
@@ -296,7 +270,8 @@
   }
 
   function getSiteId() {
-    return new URLSearchParams(location.search).get('id') || '';
+    const qs = new URLSearchParams(location.search);
+    return qs.get('id') || qs.get('site') || '';
   }
 
   function switchTab(tab, btn) {
@@ -324,6 +299,123 @@
 
   function openPma() { window.open('/phpmyadmin-lite.html?id='+getSiteId(), '_blank'); }
 
+  // ── WordPress 관리자 / DB(phpMyAdmin) 관리자 정보 (항목 9) ─────────────────
+  function fv(value) { return wpspot.escapeHtml(value ?? '—'); }
+
+  function renderCredCards(cred) {
+    const wp  = cred.wordpress || {};
+    const pma = cred.pma || {};
+    return `
+      <div class="info-card" style="flex-direction:column;align-items:stretch;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+          <div class="info-card__icon">🔑</div>
+          <div>
+            <div class="info-card__title">WordPress 관리자</div>
+            <div class="info-card__subtitle">wp-admin 로그인 정보</div>
+          </div>
+        </div>
+        <div class="field-row">
+          <span class="field-label">관리자 URL</span>
+          <span class="field-value">${wp.adminUrl ? `<a href="${fv(wp.adminUrl)}" target="_blank" class="text-brand">${fv(wp.adminUrl)}</a>` : '—'}</span>
+        </div>
+        <div class="field-row">
+          <span class="field-label">아이디</span>
+          <div class="cred-row" style="flex:1;">
+            <span class="field-value">${fv(wp.username)}</span>
+            <button class="btn btn--outline btn--sm" onclick="copyCred('${fv(wp.username)}')">복사</button>
+          </div>
+        </div>
+        <div class="field-row">
+          <span class="field-label">비밀번호</span>
+          <div class="cred-row" style="flex:1;">
+            <span class="cred-masked" id="wpPwField">••••••••</span>
+            <button class="reveal-btn" onclick="togglePw('wpPwField', ${JSON.stringify(wp.password || '')})">보기</button>
+            <button class="btn btn--outline btn--sm" onclick="copyCred(${JSON.stringify(wp.password || '')})">복사</button>
+          </div>
+        </div>
+        ${wp.adminUrl ? `<a class="btn btn--primary btn--sm" style="margin-top:12px;align-self:flex-start;" href="${fv(wp.adminUrl)}" target="_blank">wp-admin 열기 ↗</a>` : ''}
+      </div>
+
+      <div class="info-card" style="flex-direction:column;align-items:stretch;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+          <div class="info-card__icon">🗄️</div>
+          <div>
+            <div class="info-card__title">데이터베이스 관리자 (phpMyAdmin)</div>
+            <div class="info-card__subtitle">${fv(pma.engine || 'MariaDB/MySQL')}</div>
+          </div>
+        </div>
+        <div class="field-row">
+          <span class="field-label">접속 주소</span>
+          <span class="field-value">${pma.url ? `<a href="${fv(pma.url)}" target="_blank" class="text-brand">${fv(pma.url)}</a>` : `<a href="${fv(pma.fallbackUrl)}" class="text-brand">임시 접속(토큰)</a>`}</span>
+        </div>
+        <div class="field-row">
+          <span class="field-label">호스트</span>
+          <span class="field-value">${fv(pma.dbHost)}:${fv(pma.dbPort)}</span>
+        </div>
+        <div class="field-row">
+          <span class="field-label">DB 이름</span>
+          <span class="field-value">${fv(pma.dbName)}</span>
+        </div>
+        <div class="field-row">
+          <span class="field-label">아이디</span>
+          <div class="cred-row" style="flex:1;">
+            <span class="field-value">${fv(pma.username)}</span>
+            <button class="btn btn--outline btn--sm" onclick="copyCred('${fv(pma.username)}')">복사</button>
+          </div>
+        </div>
+        <div class="field-row">
+          <span class="field-label">비밀번호</span>
+          <div class="cred-row" style="flex:1;">
+            <span class="cred-masked" id="pmaPwField">••••••••</span>
+            <button class="reveal-btn" onclick="togglePw('pmaPwField', ${JSON.stringify(pma.password || '')})">보기</button>
+            <button class="btn btn--outline btn--sm" onclick="copyCred(${JSON.stringify(pma.password || '')})">복사</button>
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:12px;">
+          <button class="btn btn--primary btn--sm" onclick="openPma()">phpMyAdmin 열기 ↗</button>
+        </div>
+        <div class="notice-box" style="margin-top:12px;font-size:13px;color:var(--text-secondary);">
+          🔒 phpMyAdmin 접속 링크는 매일 자정(KST) 기준으로 갱신돼요.
+        </div>
+      </div>
+    `;
+  }
+
+  function togglePw(fieldId, pw) {
+    const el = document.getElementById(fieldId);
+    if (!el) return;
+    if (el.textContent === '••••••••') {
+      el.textContent = pw || '(설정되지 않음)';
+      el.style.letterSpacing = '0';
+    } else {
+      el.textContent = '••••••••';
+      el.style.letterSpacing = '2px';
+    }
+  }
+
+  function copyCred(val) {
+    if (!val || val === '—') { wpspot.toast('복사할 값이 없어요.'); return; }
+    (navigator.clipboard?.writeText(val) || Promise.reject()).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = val; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+    });
+    wpspot.toast('복사했어요 ✓', 'success');
+  }
+
+  function loadCredentials() {
+    const area = document.getElementById('credInfoArea');
+    wpspot.api('/api/sites/' + getSiteId() + '/credentials').then(cred => {
+      if (!cred.provisioned) {
+        area.innerHTML = `<div class="card" style="text-align:center;padding:40px;color:var(--text-secondary);">아직 프로비저닝이 완료되지 않았어요. 잠시 후 다시 확인해주세요.</div>`;
+        return;
+      }
+      area.innerHTML = renderCredCards(cred);
+    }).catch(e => {
+      area.innerHTML = `<div class="card" style="text-align:center;padding:40px;color:var(--text-secondary);">${fv(e.message)}</div>`;
+    });
+  }
+
   // 초기 로드
   const siteId = getSiteId();
   if (siteId) {
@@ -339,6 +431,7 @@
       if (currentPlanIdx < 0) currentPlanIdx = 0;
       selectedPlanIdx = currentPlanIdx;
     }).catch(() => {});
+    loadCredentials();
   }
 
   // 슬라이더 초기화
