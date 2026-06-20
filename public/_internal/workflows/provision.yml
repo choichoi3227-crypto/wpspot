@@ -237,7 +237,7 @@ jobs:
           fi
           php8.3 -r "include 'wordpress/wp-includes/version.php'; echo 'WP ' . \$wp_version . PHP_EOL;"
 
-      - name: PHPMyAdmin 설치 (PLA 대신)
+      - name: phpMyAdmin 설치
         run: |
           PMA_DIR="wordpress/wp-content/phpmyadmin"
           if [ ! -f "$PMA_DIR/index.php" ]; then
@@ -275,37 +275,37 @@ jobs:
           WP_DIR="$(pwd)/wordpress"
 
           cat > wordpress/wp-config.php << PHPEOF
-<?php
-define('DB_NAME',     'wordpress');
-define('DB_USER',     'wpuser');
-define('DB_PASSWORD', '${DB_PASS}');
-define('DB_HOST',     '127.0.0.1');
-define('DB_CHARSET',  'utf8mb4');
-define('DB_COLLATE',  'utf8mb4_unicode_ci');
-define('WP_HOME',    '${SITE_URL}');
-define('WP_SITEURL', '${SITE_URL}');
-define('WP_CACHE',            true);
-define('WP_DEBUG',            false);
-define('WP_DEBUG_LOG',        false);
-define('CONCATENATE_SCRIPTS', false);
-define('DISALLOW_FILE_EDIT',  false);
-define('FS_METHOD',           'direct');
-define('WP_CONTENT_DIR',      '${WP_DIR}/wp-content');
-define('WP_CONTENT_URL',      '${SITE_URL}/wp-content');
-// Redis Object Cache (로컬 Redis 7 — 무료, 진짜 Redis)
-define('WP_REDIS_HOST',       '127.0.0.1');
-define('WP_REDIS_PORT',       6379);
-define('WP_REDIS_PASSWORD',   '${REDIS_PASS}');
-define('WP_REDIS_DATABASE',   0);
-define('WP_REDIS_TIMEOUT',    1);
-define('WP_REDIS_READ_TIMEOUT', 1);
-define('WP_REDIS_PREFIX',     'wp_${{ inputs.site_slug }}_');
-define('WP_REDIS_MAXTTL',     86400);
-${SALTS}
-\$table_prefix = 'wp_';
-if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }
-require_once ABSPATH . 'wp-settings.php';
-PHPEOF
+          <?php
+          define('DB_NAME',     'wordpress');
+          define('DB_USER',     'wpuser');
+          define('DB_PASSWORD', '${DB_PASS}');
+          define('DB_HOST',     '127.0.0.1');
+          define('DB_CHARSET',  'utf8mb4');
+          define('DB_COLLATE',  'utf8mb4_unicode_ci');
+          define('WP_HOME',    '${SITE_URL}');
+          define('WP_SITEURL', '${SITE_URL}');
+          define('WP_CACHE',            true);
+          define('WP_DEBUG',            false);
+          define('WP_DEBUG_LOG',        false);
+          define('CONCATENATE_SCRIPTS', false);
+          define('DISALLOW_FILE_EDIT',  false);
+          define('FS_METHOD',           'direct');
+          define('WP_CONTENT_DIR',      '${WP_DIR}/wp-content');
+          define('WP_CONTENT_URL',      '${SITE_URL}/wp-content');
+          // Redis Object Cache (로컬 Redis 7 — 무료, 진짜 Redis)
+          define('WP_REDIS_HOST',       '127.0.0.1');
+          define('WP_REDIS_PORT',       6379);
+          define('WP_REDIS_PASSWORD',   '${REDIS_PASS}');
+          define('WP_REDIS_DATABASE',   0);
+          define('WP_REDIS_TIMEOUT',    1);
+          define('WP_REDIS_READ_TIMEOUT', 1);
+          define('WP_REDIS_PREFIX',     'wp_${{ inputs.site_slug }}_');
+          define('WP_REDIS_MAXTTL',     86400);
+          ${SALTS}
+          \$table_prefix = 'wp_';
+          if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }
+          require_once ABSPATH . 'wp-settings.php';
+          PHPEOF
 
           [ -s wordpress/wp-config.php ] \
             && echo "✓ wp-config.php 생성 완료 ($(wc -l < wordpress/wp-config.php) 줄)" \
@@ -494,26 +494,26 @@ PHPEOF
           echo "PMA_WORKER=${WORKER_NAME}-pma" >> $GITHUB_ENV
 
           python3 - << PYEOF
-import json
-data = {
-  'wp_port':  8080,
-  'pma_port': 8081,
-  'php_fpm_ports': [9000, 9001],
-  'redis_port': 6379,
-  'mariadb_port': 3306,
-  'wordpress_dir': 'wordpress',
-  'pma_dir': 'wordpress/wp-content/phpmyadmin',
-  'worker_name': '${WORKER_NAME}',
-  'pma_worker':  '${WORKER_NAME}-pma',
-  'site_slug':   '${{ inputs.site_slug }}',
-  'custom_domain': '${{ inputs.custom_domain }}',
-  'stack': 'nginx+php-fpm+mariadb+redis',
-  'php_version': '8.3',
-  'nginx_version': 'system',
-}
-open('deploy/tunnel-config.json','w').write(json.dumps(data, indent=2))
-print('tunnel-config.json 저장 완료')
-PYEOF
+          import json
+          data = {
+            'wp_port':  8080,
+            'pma_port': 8081,
+            'php_fpm_ports': [9000, 9001],
+            'redis_port': 6379,
+            'mariadb_port': 3306,
+            'wordpress_dir': 'wordpress',
+            'pma_dir': 'wordpress/wp-content/phpmyadmin',
+            'worker_name': '${WORKER_NAME}',
+            'pma_worker':  '${WORKER_NAME}-pma',
+            'site_slug':   '${{ inputs.site_slug }}',
+            'custom_domain': '${{ inputs.custom_domain }}',
+            'stack': 'nginx+php-fpm+mariadb+redis',
+            'php_version': '8.3',
+            'nginx_version': 'system',
+          }
+          open('deploy/tunnel-config.json','w').write(json.dumps(data, indent=2))
+          print('tunnel-config.json 저장 완료')
+          PYEOF
 
       # ────────────────────────────────────────────────
       # STEP 8: cloudflared + Named Tunnel
@@ -568,29 +568,29 @@ PYEOF
             [ -z "$TOKEN" ] && { echo "::error::Tunnel Token 실패: $NAME"; exit 1; }
             echo "${ID}|${TOKEN}"
           }
-
+          
           WP_R=$(create_or_get_tunnel "wpspot-${{ inputs.site_slug }}-wp")
           WP_TUNNEL_ID="${WP_R%|*}"; WP_TUNNEL_TOKEN="${WP_R#*|}"
           PMA_R=$(create_or_get_tunnel "wpspot-${{ inputs.site_slug }}-pma")
           PMA_TUNNEL_ID="${PMA_R%|*}"; PMA_TUNNEL_TOKEN="${PMA_R#*|}"
-
+          
           echo "WP_TUNNEL_ID=${WP_TUNNEL_ID}"       >> $GITHUB_ENV
           echo "WP_TUNNEL_TOKEN=${WP_TUNNEL_TOKEN}"  >> $GITHUB_ENV
           echo "WP_TUNNEL_HOST=${WP_TUNNEL_ID}.cfargotunnel.com" >> $GITHUB_ENV
           echo "PMA_TUNNEL_ID=${PMA_TUNNEL_ID}"      >> $GITHUB_ENV
           echo "PMA_TUNNEL_TOKEN=${PMA_TUNNEL_TOKEN}" >> $GITHUB_ENV
           echo "PMA_TUNNEL_HOST=${PMA_TUNNEL_ID}.cfargotunnel.com" >> $GITHUB_ENV
-
+          
           # tunnel-config.json 업데이트
           python3 -c "
-import json
-cfg = json.load(open('deploy/tunnel-config.json'))
-cfg['wp_tunnel_id']   = '${WP_TUNNEL_ID}'
-cfg['wp_tunnel_host'] = '${WP_TUNNEL_ID}.cfargotunnel.com'
-cfg['pma_tunnel_id']  = '${PMA_TUNNEL_ID}'
-cfg['pma_tunnel_host']= '${PMA_TUNNEL_ID}.cfargotunnel.com'
-open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
-"
+          import json
+          cfg = json.load(open('deploy/tunnel-config.json'))
+          cfg['wp_tunnel_id']   = '${WP_TUNNEL_ID}'
+          cfg['wp_tunnel_host'] = '${WP_TUNNEL_ID}.cfargotunnel.com'
+          cfg['pma_tunnel_id']  = '${PMA_TUNNEL_ID}'
+          cfg['pma_tunnel_host']= '${PMA_TUNNEL_ID}.cfargotunnel.com'
+          open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
+          "
 
       - name: Named Tunnel 연결 (WP → nginx:8080)
         run: |
@@ -641,50 +641,50 @@ open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
             local NAME="$1" TUNNEL_HOST="$2" WORKDIR="/tmp/cf-${NAME}"
             mkdir -p "$WORKDIR"
             python3 - << PYEOF
-js = r"""export default {
-  async fetch(request, env) {
-    const origin = env.TUNNEL_ORIGIN;
-    if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
-    const url = new URL(request.url);
-    const t = new URL(origin);
-    t.pathname = url.pathname; t.search = url.search;
-    const h = new Headers(request.headers);
-    h.set('host', new URL(origin).host);
-    h.set('x-forwarded-proto','https');
-    h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
-    try {
-      const r = await fetch(t.toString(), {
-        method: request.method, headers: h,
-        body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
-        redirect: 'manual'
-      });
-      const out = new Headers(r.headers);
-      out.set('x-powered-by','wpspot/nginx+php-fpm');
-      return new Response(r.body, {status:r.status, headers:out});
-    } catch(e) {
-      return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
-    }
-  }
-};
-function offline(m=''){
-  return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="30"><title>잠시 후 이용 가능해요</title>'
-    +'<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
-    +'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
-    +'.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
-    +'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}'
-    +'.dot{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:8px;animation:pulse 1.5s infinite}'
-    +'@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style></head>'
-    +'<body><div class="box"><div><span class="dot"></span></div><h2>서버 준비 중이에요</h2>'
-    +'<p>30초 후 자동으로 새로고침됩니다.</p>'
-    +(m?'<p style="font-size:.75rem;color:#94a3b8;margin-top:12px">'+m+'</p>':'')+'</div></body></html>';
-}"""
-open('${WORKDIR}/worker.js','w').write(js)
-PYEOF
+          js = r"""export default {
+            async fetch(request, env) {
+              const origin = env.TUNNEL_ORIGIN;
+              if (!origin) return new Response(offline(), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+              const url = new URL(request.url);
+              const t = new URL(origin);
+              t.pathname = url.pathname; t.search = url.search;
+              const h = new Headers(request.headers);
+              h.set('host', new URL(origin).host);
+              h.set('x-forwarded-proto','https');
+              h.set('x-real-ip', request.headers.get('cf-connecting-ip') || '');
+              try {
+                const r = await fetch(t.toString(), {
+                  method: request.method, headers: h,
+                  body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+                  redirect: 'manual'
+                });
+                const out = new Headers(r.headers);
+                out.set('x-powered-by','wpspot/nginx+php-fpm');
+                return new Response(r.body, {status:r.status, headers:out});
+              } catch(e) {
+                return new Response(offline(e.message), {status:503,headers:{'Content-Type':'text/html;charset=utf-8','Retry-After':'30'}});
+              }
+            }
+          };
+          function offline(m=''){
+            return '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="30"><title>잠시 후 이용 가능해요</title>'
+              +'<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+              +'background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}'
+              +'.box{background:#fff;border-radius:16px;padding:40px;max-width:400px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.06)}'
+              +'h2{color:#0f172a;font-size:1.4rem;margin-bottom:12px}p{color:#64748b;line-height:1.6;font-size:.95rem}'
+              +'.dot{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:8px;animation:pulse 1.5s infinite}'
+              +'@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style></head>'
+              +'<body><div class="box"><div><span class="dot"></span></div><h2>서버 준비 중이에요</h2>'
+              +'<p>30초 후 자동으로 새로고침됩니다.</p>'
+              +(m?'<p style="font-size:.75rem;color:#94a3b8;margin-top:12px">'+m+'</p>':'')+'</div></body></html>';
+          }"""
+          open('${WORKDIR}/worker.js','w').write(js)
+          PYEOF
             python3 -c "
-name='${NAME}'; host='${TUNNEL_HOST}'
-toml='name=\"'+name+'\"\nmain=\"worker.js\"\ncompatibility_date=\"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN=\"https://'+host+'\"\n'
-open('${WORKDIR}/wrangler.toml','w').write(toml)
-"
+          name='${NAME}'; host='${TUNNEL_HOST}'
+          toml='name=\"'+name+'\"\nmain=\"worker.js\"\ncompatibility_date=\"2024-09-23\"\n[vars]\nTUNNEL_ORIGIN=\"https://'+host+'\"\n'
+          open('${WORKDIR}/wrangler.toml','w').write(toml)
+          "
             cd "$WORKDIR" && wrangler deploy --minify
             echo "✓ Worker 배포: ${NAME}"
           }
@@ -701,13 +701,13 @@ open('${WORKDIR}/wrangler.toml','w').write(toml)
 
           # tunnel-config.json 업데이트
           python3 -c "
-import json
-cfg = json.load(open('deploy/tunnel-config.json'))
-cfg['worker_url']      = '${WORKER_URL}'
-cfg['final_site_url']  = '${FINAL_URL}'
-cfg['pma_worker_url']  = 'https://${{ inputs.secret_cf_account_id }}.workers.dev/${PMA_WORKER}'
-open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
-"
+          import json
+          cfg = json.load(open('deploy/tunnel-config.json'))
+          cfg['worker_url']      = '${WORKER_URL}'
+          cfg['final_site_url']  = '${FINAL_URL}'
+          cfg['pma_worker_url']  = 'https://${{ inputs.secret_cf_account_id }}.workers.dev/${PMA_WORKER}'
+          open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
+          "
 
           # 커스텀 도메인 자동 등록
           register_domain() {
@@ -747,17 +747,17 @@ open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
               -d "{\"domains\":[{\"zone_id\":\"${ZONE_ID}\",\"hostname\":\"${DOMAIN}\"}]}" > /dev/null
             echo "✓ 도메인 등록: ${DOMAIN} → ${WORKER}"
           }
-
+          
           register_domain "${{ inputs.custom_domain }}" "$WORKER_NAME"
           register_domain "${{ inputs.pma_domain }}"    "$PMA_WORKER"
-
-      # ────────────────────────────────────────────────
-      # STEP 10: GitHub Secrets 등록
-      # ────────────────────────────────────────────────
-      - name: GitHub Secrets 등록
-        env:
+          
+                # ────────────────────────────────────────────────
+                # STEP 10: GitHub Secrets 등록
+                # ────────────────────────────────────────────────
+                - name: GitHub Secrets 등록
+                  env:
           GH_PAT: ${{ inputs.secret_github_token }}
-        run: |
+                  run: |
           REPO="${{ github.repository }}"
           [ -z "$GH_PAT" ] && { echo "PAT 없음 — 건너뜀"; exit 0; }
           pip install PyNaCl --quiet --break-system-packages 2>/dev/null
@@ -772,12 +772,12 @@ open('deploy/tunnel-config.json','w').write(json.dumps(cfg, indent=2))
             local N="$1" V="$2"
             [ -z "$V" ] && return
             ENC=$(python3 -c "
-import sys,base64
-from nacl import encoding,public
-pub=public.PublicKey(sys.argv[1].encode(),encoding.Base64Encoder)
-enc=public.SealedBox(pub).encrypt(sys.argv[2].encode())
-print(base64.b64encode(enc).decode())
-" "$PUB_KEY" "$V" 2>/dev/null)
+          import sys,base64
+          from nacl import encoding,public
+          pub=public.PublicKey(sys.argv[1].encode(),encoding.Base64Encoder)
+          enc=public.SealedBox(pub).encrypt(sys.argv[2].encode())
+          print(base64.b64encode(enc).decode())
+          " "$PUB_KEY" "$V" 2>/dev/null)
             CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
               -H "Authorization: Bearer ${GH_PAT}" \
               -H "Accept: application/vnd.github+json" \
@@ -792,12 +792,12 @@ print(base64.b64encode(enc).decode())
           set_secret "PMA_TUNNEL_TOKEN" "${PMA_TUNNEL_TOKEN}"
           set_secret "DB_PASS"         "${DB_PASS}"
           set_secret "REDIS_PASS"      "${REDIS_PASS}"
-
-      # ────────────────────────────────────────────────
-      # STEP 11: DB 백업 + git push
-      # ────────────────────────────────────────────────
-      - name: DB 백업 및 커밋
-        run: |
+          
+                # ────────────────────────────────────────────────
+                # STEP 11: DB 백업 + git push
+                # ────────────────────────────────────────────────
+                - name: DB 백업 및 커밋
+                  run: |
           mkdir -p wordpress/db-backup
           mysqldump -u wpuser -p"${DB_PASS}" -h 127.0.0.1 wordpress \
             2>/dev/null | gzip > wordpress/db-backup/latest.sql.gz
@@ -811,12 +811,12 @@ print(base64.b64encode(enc).decode())
           git diff --cached --quiet || \
             git commit -m "chore: provision wordpress [${{ inputs.site_slug }}]"
           git push
-
-      # ────────────────────────────────────────────────
-      # STEP 12: wpspot 콜백
-      # ────────────────────────────────────────────────
-      - name: wpspot 콜백
-        run: |
+          
+                # ────────────────────────────────────────────────
+                # STEP 12: wpspot 콜백
+                # ────────────────────────────────────────────────
+                - name: wpspot 콜백
+                  run: |
           CALLBACK="${{ inputs.wpspot_callback_url }}"
           SITE_ID="${{ inputs.wpspot_site_id }}"
           JWT="${{ inputs.wpspot_jwt }}"
@@ -824,27 +824,27 @@ print(base64.b64encode(enc).decode())
             echo "콜백 정보 없음 — 건너뜀"; exit 0
           }
           python3 - << PYEOF
-import json, urllib.request
-payload = json.dumps({
-  'siteId':       '${SITE_ID}',
-  'tunnelWpUrl':  'https://${WP_TUNNEL_HOST:-}',
-  'tunnelPmaUrl': 'https://${PMA_TUNNEL_HOST:-}',
-  'workerUrl':    '${WORKER_URL:-}',
-  'finalSiteUrl': '${FINAL_SITE_URL:-}',
-  'stack':        'nginx+php-fpm8.3+mariadb+redis7',
-  'status':       'active'
-}).encode()
-req = urllib.request.Request('${CALLBACK}', data=payload,
-  headers={'Authorization':'Bearer ${JWT}','Content-Type':'application/json'}, method='POST')
-try:
-  r = urllib.request.urlopen(req, timeout=10)
-  print('콜백 응답:', r.status)
-except Exception as e:
-  print('::warning::콜백 실패:', e)
-PYEOF
-
-      - name: 완료 요약
-        run: |
+          import json, urllib.request
+          payload = json.dumps({
+            'siteId':       '${SITE_ID}',
+            'tunnelWpUrl':  'https://${WP_TUNNEL_HOST:-}',
+            'tunnelPmaUrl': 'https://${PMA_TUNNEL_HOST:-}',
+            'workerUrl':    '${WORKER_URL:-}',
+            'finalSiteUrl': '${FINAL_SITE_URL:-}',
+            'stack':        'nginx+php-fpm8.3+mariadb+redis7',
+            'status':       'active'
+          }).encode()
+          req = urllib.request.Request('${CALLBACK}', data=payload,
+            headers={'Authorization':'Bearer ${JWT}','Content-Type':'application/json'}, method='POST')
+          try:
+            r = urllib.request.urlopen(req, timeout=10)
+            print('콜백 응답:', r.status)
+          except Exception as e:
+            print('::warning::콜백 실패:', e)
+          PYEOF
+          
+                - name: 완료 요약
+                  run: |
           echo "================================================"
           echo "  wpspot 프로비저닝 완료"
           echo "  스택: nginx + PHP-FPM 8.3 + MariaDB + Redis 7"
@@ -859,15 +859,15 @@ PYEOF
           echo "  Redis 7: 6379 (로컬, 무료)"
           echo "  OPcache: 128MB"
           echo "================================================"
-
-      # ────────────────────────────────────────────────
-      # STEP 13: 서버 유지 (6분 자동복구)
-      # ────────────────────────────────────────────────
-      - name: 서버/터널 유지 (6분)
-        env:
+          
+                # ────────────────────────────────────────────────
+                # STEP 13: 서버 유지 (6분 자동복구)
+                # ────────────────────────────────────────────────
+                - name: 서버/터널 유지 (6분)
+                  env:
           WP_TUNNEL_TOKEN:  ${{ secrets.WP_TUNNEL_TOKEN }}
           PMA_TUNNEL_TOKEN: ${{ secrets.PMA_TUNNEL_TOKEN }}
-        run: |
+                  run: |
           recover() {
             # nginx
             sudo systemctl is-active nginx  > /dev/null 2>&1 || sudo systemctl restart nginx

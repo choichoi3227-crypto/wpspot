@@ -112,9 +112,9 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
     // 사용자 자격증명 생성
     const wpAdminUser    = generateUsername();
     const wpAdminPass    = generatePassword();
-    const plaPass        = generatePassword();
-    const plaPassHash    = await hashPassword(plaPass);
-    const plaPassEnc     = await encryptSecret(env, plaPass);
+    const pmaPass        = generatePassword();
+    const pmaPassHash    = await hashPassword(pmaPass);
+    const pmaPassEnc     = await encryptSecret(env, pmaPass);
     const wpAdminPassEnc = await encryptSecret(env, wpAdminPass);
 
     // 콜백용 단기 JWT (사이트 ID 포함, 1시간)
@@ -171,13 +171,17 @@ async function provisionSite(env, userId, site, customDomain, zoneId) {
       await env.DB.prepare(
         `INSERT INTO site_credentials
          (site_id,pla_username,pla_password_hash,pla_password_plain_enc,
-          wp_admin_username,wp_admin_password_plain_enc,db_path,nginx_status,
+          pma_username,pma_password_hash,pma_password_plain_enc,
+          wp_admin_username,wp_admin_password_plain_enc,db_path,
+          db_engine,db_host,db_port,db_name,db_username,nginx_status,
           redis_enabled,redis_provider,php_main_ports,php_sub_ports,php_active_ports)
-         VALUES (?,?,?,?,?,?,?,'provisioning',?,?,?,?,?)`
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?,?,?,?,?)`
       ).bind(
-        siteId, "admin", plaPassHash, plaPassEnc,
+        siteId, "admin", pmaPassHash, pmaPassEnc,
+        "admin", pmaPassHash, pmaPassEnc,
         wpAdminUser, wpAdminPassEnc,
-        "mariadb://wordpress",
+        "wordpress@127.0.0.1:3306",
+        "MariaDB/MySQL", "127.0.0.1", "3306", "wordpress", "wpuser",
         redisEnabled,
         "Redis 7 (로컬, 무료)",
         "8080",
@@ -285,22 +289,28 @@ async function handleApi(request, env, url) {
     return json({ token, user: { id: user.id, email: user.email, displayName: user.display_name } });
   }
 
-  // ── PHPLiteAdmin 토큰 인증 (공개) ────────────────────────────────────────
+  // ── phpMyAdmin 토큰 인증 (공개, 기존 PLA 토큰 테이블 호환) ────────────────
 
-  const plaAuthMatch = pathname.match(/^\/api\/pla\/([^/]+)\/auth$/);
-  if (plaAuthMatch && method === "POST") {
-    const token = plaAuthMatch[1];
-    const { password } = await request.json().catch(() => ({}));
+  const pmaAuthMatch = pathname.match(/^\/api\/(?:pma|pla)\/([^/]+)\/auth$/);
+  if (pmaAuthMatch && method === "POST") {
+    const token = pmaAuthMatch[1];
+    const { username, password } = await request.json().catch(() => ({}));
     const now = Math.floor(Date.now() / 1000);
-    const tokenRow = await env.DB.prepare(
-      "SELECT * FROM pla_tokens WHERE token=? AND expires_at>?"
+    let tokenRow = await env.DB.prepare(
+      "SELECT * FROM pma_tokens WHERE token=? AND expires_at>?"
     ).bind(token, now).first();
+    if (!tokenRow) {
+      tokenRow = await env.DB.prepare("SELECT * FROM pla_tokens WHERE token=? AND expires_at>?").bind(token, now).first().catch(() => null);
+    }
     if (!tokenRow) return err("접속 링크가 만료됐거나 유효하지 않아요.", 401);
     const cred = await env.DB.prepare(
       "SELECT * FROM site_credentials WHERE site_id=?"
     ).bind(tokenRow.site_id).first();
     if (!cred) return err("사이트 자격증명을 찾을 수 없어요.", 404);
-    if (!await verifyPassword(password, cred.pla_password_hash))
+    if (username && username !== (cred.pma_username || cred.pla_username || "admin"))
+      return err("아이디가 올바르지 않아요.", 401);
+    const passwordHash = cred.pma_password_hash || cred.pla_password_hash;
+    if (!passwordHash || !await verifyPassword(password, passwordHash))
       return err("비밀번호가 올바르지 않아요.", 401);
     const sessionToken = await signJWT({ sub: tokenRow.site_id, pla: true }, env.JWT_SECRET, 3600);
     return json({ ok: true, sessionToken, siteId: tokenRow.site_id });
@@ -346,7 +356,7 @@ async function handleApi(request, env, url) {
         await env.DB.prepare(
           `INSERT INTO site_credentials
            (site_id, pla_username, pla_password_hash, db_path, nginx_status)
-           VALUES (?, 'admin', '', 'wp-content/database/wordpress.db', 'active')`
+           VALUES (?, 'admin', '', 'wordpress@127.0.0.1:3306', 'active')`
         ).bind(siteId).run().catch(() => {});
       } else {
         await env.DB.prepare(
@@ -499,6 +509,7 @@ async function handleApi(request, env, url) {
     for (const t of wpTables) {
       await env.DB.prepare(`DELETE FROM ${t} WHERE site_id=?`).bind(siteId).run().catch(() => {});
     }
+    await env.DB.prepare("DELETE FROM pma_tokens WHERE site_id=?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM pla_tokens WHERE site_id=?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM site_credentials WHERE site_id=?").bind(siteId).run().catch(() => {});
     await env.DB.prepare("DELETE FROM site_jobs WHERE site_id=?").bind(siteId).run().catch(() => {});
@@ -815,40 +826,52 @@ async function handleApi(request, env, url) {
     ).bind(siteId).first();
     if (!row) return json({ provisioned: false });
 
-    const plaPass = row.pla_password_plain_enc
-      ? await decryptSecret(env, row.pla_password_plain_enc)
+    const pmaPass = (row.pma_password_plain_enc || row.pla_password_plain_enc)
+      ? await decryptSecret(env, row.pma_password_plain_enc || row.pla_password_plain_enc)
       : null;
     const wpPass = row.wp_admin_password_plain_enc
       ? await decryptSecret(env, row.wp_admin_password_plain_enc)
       : null;
 
-    // PLA 토큰 발급/조회
+    // phpMyAdmin 임시 토큰 발급/조회
     const now = Math.floor(Date.now() / 1000);
-    let plaToken = await env.DB.prepare(
-      "SELECT token FROM pla_tokens WHERE site_id=? AND expires_at>?"
+    let pmaToken = await env.DB.prepare(
+      "SELECT token FROM pma_tokens WHERE site_id=? AND expires_at>?"
     ).bind(siteId, now).first();
-    if (!plaToken) {
+    if (!pmaToken) {
       const newToken = randomToken();
       await env.DB.prepare(
-        "INSERT INTO pla_tokens (id,site_id,token,expires_at) VALUES (?,?,?,?)"
+        "INSERT INTO pma_tokens (id,site_id,token,expires_at) VALUES (?,?,?,?)"
       ).bind(uid(), siteId, newToken, kstMidnightTimestamp()).run();
-      plaToken = { token: newToken };
+      pmaToken = { token: newToken };
     }
 
     const customDomain = site.custom_domain;
-    const plaUrl   = customDomain ? `https://pma.${customDomain}` : (site.tunnel_pla_url || null);
+    const pmaUrl   = customDomain ? `https://pma.${customDomain}` : (site.tunnel_pla_url || null);
     const adminUrl = customDomain
       ? `https://${customDomain}/wp-admin`
       : (site.cf_worker_url ? `${site.cf_worker_url}/wp-admin` : null);
 
     return json({
       provisioned: true,
+      pma: {
+        url:         pmaUrl,
+        fallbackUrl: `/phpmyadmin-lite.html?token=${pmaToken.token}`,
+        username:    row.pma_username || row.pla_username || "admin",
+        password:    pmaPass,
+        dbHost:      row.db_host || "127.0.0.1",
+        dbPort:      row.db_port || "3306",
+        dbName:      row.db_name || "wordpress",
+        dbUser:      row.db_username || "wpuser",
+        dbPath:      row.db_path || "wordpress@127.0.0.1:3306",
+        engine:      row.db_engine || "MariaDB/MySQL",
+      },
       pla: {
-        url:         plaUrl,
-        fallbackUrl: `/phpliteadmin-lite.html?token=${plaToken.token}`,
-        username:    row.pla_username || "admin",
-        password:    plaPass,
-        dbPath:      row.db_path,
+        url:         pmaUrl,
+        fallbackUrl: `/phpmyadmin-lite.html?token=${pmaToken.token}`,
+        username:    row.pma_username || row.pla_username || "admin",
+        password:    pmaPass,
+        dbPath:      row.db_path || "wordpress@127.0.0.1:3306",
       },
       wordpress: {
         adminUrl,
@@ -862,7 +885,7 @@ async function handleApi(request, env, url) {
       },
       redis: {
         enabled: !!row.redis_enabled,
-        provider: row.redis_enabled ? "Upstash 서버리스 Redis" : null,
+        provider: row.redis_enabled ? (row.redis_provider || "Redis 7 (로컬)") : null,
       },
       domain: {
         customDomain: site.custom_domain,
@@ -873,9 +896,9 @@ async function handleApi(request, env, url) {
     });
   }
 
-  // ── PHPLiteAdmin 데이터 ───────────────────────────────────────────────────
+  // ── phpMyAdmin Lite 데이터 (D1 호환 뷰, 실 DB는 MariaDB/MySQL) ─────────────
 
-  if (pathname === "/api/pla/tables" && method === "GET") {
+  if ((pathname === "/api/pma/tables" || pathname === "/api/pla/tables") && method === "GET") {
     const auth = request.headers.get("Authorization") || "";
     const m = auth.match(/^Bearer\s+(.+)$/i);
     if (!m) return err("인증이 필요해요.", 401);
@@ -899,7 +922,7 @@ async function handleApi(request, env, url) {
     return json({ tables: tableData });
   }
 
-  if (pathname === "/api/pla/update" && method === "POST") {
+  if ((pathname === "/api/pma/update" || pathname === "/api/pla/update") && method === "POST") {
     const auth = request.headers.get("Authorization") || "";
     const m = auth.match(/^Bearer\s+(.+)$/i);
     if (!m) return err("인증이 필요해요.", 401);
@@ -918,7 +941,7 @@ async function handleApi(request, env, url) {
     return json({ ok: true });
   }
 
-  if (pathname === "/api/pla/delete" && method === "POST") {
+  if ((pathname === "/api/pma/delete" || pathname === "/api/pla/delete") && method === "POST") {
     const auth = request.headers.get("Authorization") || "";
     const m = auth.match(/^Bearer\s+(.+)$/i);
     if (!m) return err("인증이 필요해요.", 401);

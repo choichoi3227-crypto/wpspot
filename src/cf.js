@@ -1,4 +1,4 @@
-// src/cf.js — Cloudflare API 유틸리티 (블로그스팟 제거)
+// src/cf.js — Cloudflare API 유틸리티
 const CF_API = "https://api.cloudflare.com/client/v4";
 
 function authHeaders(email, globalApiKey) {

@@ -124,7 +124,7 @@
   <div class="domain-modal-overlay" id="domainModal">
     <div class="domain-modal">
       <h3 id="domainModalTitle">🌐 개인 도메인 연결</h3>
-      <p class="body-2" id="domainModalDesc" style="margin-bottom:var(--space-4);">Cloudflare에 등록된 도메인을 이 호스팅에 연결해요. 연결하면 <code>pma.도메인</code>으로 PHPLiteAdmin에도 접속할 수 있어요.</p>
+      <p class="body-2" id="domainModalDesc" style="margin-bottom:var(--space-4);">Cloudflare에 등록된 도메인을 이 호스팅에 연결해요. 연결하면 <code>pma.도메인</code>으로 phpMyAdmin에도 접속할 수 있어요.</p>
 
       <label>도메인 선택 <span style="font-weight:400;color:var(--text-secondary);">(Cloudflare에 등록된 도메인)</span></label>
       <select id="zoneSelect" style="width:100%;padding:9px 12px;border:1.5px solid var(--border-secondary);border-radius:var(--radius-m);font-size:var(--fs-body-2);outline:none;background:var(--fill-weak);">
@@ -216,7 +216,7 @@
           </div>
           ${hasDomain ? `
             <div class="notice-box info">
-              위에서 도메인이 연결됐어요. 잠시 후 자동으로 프로비저닝이 시작돼요(또는 대시보드에서 "프로비저닝 시작"을 눌러주세요). WordPress 관리자 정보, PHPLiteAdmin 접속 정보는 완료 후 여기에 표시됩니다.
+              위에서 도메인이 연결됐어요. 잠시 후 자동으로 프로비저닝이 시작돼요(또는 대시보드에서 "프로비저닝 시작"을 눌러주세요). WordPress 관리자 정보, phpMyAdmin 접속 정보는 완료 후 여기에 표시됩니다.
             </div>` : `
             <div class="notice-box warn">
               먼저 위의 "도메인 관리" 카드에서 Primary 도메인을 연결해주세요. 도메인이 연결되면 프로비저닝이 시작되고, WordPress가 준비되면 관리자 정보가 여기에 표시돼요.
@@ -264,13 +264,13 @@
     }
 
     function render(cred, site) {
-      const pla = cred.pla || {};
+      const pma = cred.pma || {};
       const wp = cred.wordpress || {};
       const domain = cred.domain || {};
       const nginx = cred.nginx || {};
       const customDomain = domain.customDomain || site?.custom_domain;
       const pmaDomain = domain.pmaDomain || (customDomain ? `pma.${customDomain}` : null);
-      const plaUrl = pla.url || (pmaDomain ? `https://${pmaDomain}` : null);
+      const pmaUrl = pma.url || (pmaDomain ? `https://${pmaDomain}` : null);
       const adminUrl = wp.adminUrl || (customDomain ? `https://${customDomain}/wp-admin` : (nginx.workerUrl ? `${nginx.workerUrl}/wp-admin` : null));
 
       return `
@@ -315,27 +315,27 @@
           </div>
         </div>
 
-        <!-- ── PHPLiteAdmin 접속 ── -->
+        <!-- ── phpMyAdmin 접속 ── -->
         <div class="info-card">
           <div class="info-card__header">
             <div class="info-card__icon">🗄️</div>
             <div>
-              <div class="info-card__title">PHPLiteAdmin (DB 관리)</div>
-              <div class="info-card__subtitle">WordPress SQLite DB를 직접 관리</div>
+              <div class="info-card__title">phpMyAdmin (DB 관리)</div>
+              <div class="info-card__subtitle">WordPress MariaDB/MySQL DB를 직접 관리</div>
             </div>
           </div>
 
-          ${plaUrl ? `
+          ${pmaUrl ? `
             <div class="field-row">
               <span class="field-label">접속 주소</span>
-              <div class="field-value"><a href="${wpspot.escapeHtml(plaUrl)}" target="_blank">${wpspot.escapeHtml(plaUrl)}</a></div>
-              <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(plaUrl)}')">복사</button>
-              <a class="action-btn action-btn--primary" href="${wpspot.escapeHtml(plaUrl)}" target="_blank">열기 ↗</a>
+              <div class="field-value"><a href="${wpspot.escapeHtml(pmaUrl)}" target="_blank">${wpspot.escapeHtml(pmaUrl)}</a></div>
+              <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(pmaUrl)}')">복사</button>
+              <a class="action-btn action-btn--primary" href="${wpspot.escapeHtml(pmaUrl)}" target="_blank">열기 ↗</a>
             </div>` : `
             <div class="field-row">
               <span class="field-label">임시 접속</span>
-              <div class="field-value"><a href="${wpspot.escapeHtml(pla.fallbackUrl || '#')}">/phpliteadmin-lite (토큰 기반)</a></div>
-              <a class="action-btn action-btn--secondary" href="${wpspot.escapeHtml(pla.fallbackUrl || '#')}">열기</a>
+              <div class="field-value"><a href="${wpspot.escapeHtml(pma.fallbackUrl || '#')}">/phpmyadmin-lite (토큰 기반)</a></div>
+              <a class="action-btn action-btn--secondary" href="${wpspot.escapeHtml(pma.fallbackUrl || '#')}">열기</a>
             </div>
             <div class="notice-box warn" style="margin-top:var(--space-3);">
               ⚠️ 개인 도메인 연결 시 <code>pma.도메인</code>으로 정식 접속 가능해요.
@@ -344,17 +344,17 @@
 
           <div class="field-row" style="margin-top:var(--space-3);">
             <span class="field-label">비밀번호</span>
-            <div class="field-value" id="plaPwField" style="letter-spacing:3px;color:var(--text-secondary);">••••••••</div>
-            <button class="reveal-btn" onclick="togglePlaPw(${JSON.stringify(pla.password || '')})">보기</button>
-            <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(pla.password || '')}')">복사</button>
+            <div class="field-value" id="pmaPwField" style="letter-spacing:3px;color:var(--text-secondary);">••••••••</div>
+            <button class="reveal-btn" onclick="togglePlaPw(${JSON.stringify(pma.password || '')})">보기</button>
+            <button class="btn btn--secondary btn--s" onclick="copyText('${wpspot.escapeHtml(pma.password || '')}')">복사</button>
           </div>
           <div class="field-row">
             <span class="field-label">DB 경로</span>
-            ${fv(pla.dbHost || 'wp-content/database/wordpress.db')}
+            ${fv(pma.dbHost || 'wordpress@127.0.0.1:3306')}
           </div>
 
           <div style="margin-top:var(--space-3);" class="notice-box">
-            🔒 PHPLiteAdmin 직접 URL 접속은 차단되어 있어요. 반드시 <code>pma.도메인</code>을 통해서만 접근 가능해요.<br/>
+            🔒 phpMyAdmin 직접 URL 접속은 차단되어 있어요. 반드시 <code>pma.도메인</code>을 통해서만 접근 가능해요.<br/>
             접속 링크는 매일 자정(KST) 초기화됩니다.
           </div>
         </div>
@@ -462,7 +462,7 @@
     }
 
     function togglePlaPw(pw) {
-      const el = document.getElementById("plaPwField");
+      const el = document.getElementById("pmaPwField");
       if (el.textContent === "••••••••") {
         el.textContent = pw || "(없음)";
         el.style.letterSpacing = "0";
@@ -537,7 +537,7 @@
                 <a href="https://${wpspot.escapeHtml(d.hostname)}" target="_blank">${wpspot.escapeHtml(d.hostname)}</a>
               </div>
               ${isPrimary ? `
-                <div style="font-size:var(--fs-body-3);color:var(--text-secondary);">PHPLiteAdmin: <a href="https://${wpspot.escapeHtml(pmaDomain)}" target="_blank" style="color:var(--text-brand);">${wpspot.escapeHtml(pmaDomain)}</a></div>
+                <div style="font-size:var(--fs-body-3);color:var(--text-secondary);">phpMyAdmin: <a href="https://${wpspot.escapeHtml(pmaDomain)}" target="_blank" style="color:var(--text-brand);">${wpspot.escapeHtml(pmaDomain)}</a></div>
               ` : `
                 <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-body-3);color:var(--text-secondary);font-weight:400;margin:0;">
                   <input type="checkbox" ${d.redirect_to_primary ? "checked" : ""} onchange="toggleRedirect('${d.id}', this.checked)" />
@@ -601,7 +601,7 @@
       document.getElementById("domainModalTitle").textContent = hasPrimary ? "🌐 Alias 도메인 추가" : "🌐 Primary 도메인 연결";
       document.getElementById("domainModalDesc").textContent = hasPrimary
         ? "이 도메인은 같은 사이트로 함께 연결돼요. 필요하면 Primary로 301 리다이렉트할 수 있어요."
-        : "Cloudflare에 등록된 도메인을 이 호스팅의 Primary 도메인으로 연결해요. 연결하면 pma.도메인으로 PHPLiteAdmin에도 접속할 수 있어요.";
+        : "Cloudflare에 등록된 도메인을 이 호스팅의 Primary 도메인으로 연결해요. 연결하면 pma.도메인으로 phpMyAdmin에도 접속할 수 있어요.";
       document.getElementById("redirectOptionRow").style.display = hasPrimary ? "" : "none";
       document.getElementById("redirectToPrimaryCheck").checked = false;
 
