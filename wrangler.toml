@@ -21,6 +21,7 @@ id = "13f767b4020e438db9a7ee5ea320801c"
 # Secrets — wrangler secret put 으로 등록 (절대 이 파일에 평문 작성 금지)
 # wrangler secret put JWT_SECRET       → 랜덤 64자 문자열
 # wrangler secret put CRED_ENC_KEY     → base64 인코딩된 32바이트 (openssl rand -base64 32)
+# wrangler secret put PG_API_SECRET    → postgres-keepalive.yml의 PGRST_JWT_SECRET과 동일한 값
 
 [vars]
 APP_NAME = "wpspot"
@@ -28,6 +29,11 @@ APP_ENV  = "production"
 
 # Worker 자신의 공개 URL (콜백 URL 생성용)
 WPSPOT_BASE_URL = "https://cloud-press.co.kr"
+
+# 메인 DB(PostgreSQL)를 노출하는 cloudflared 터널의 공개 URL.
+# postgres-keepalive.yml의 PG_TUNNEL_TOKEN으로 만든 터널 호스트네임으로 교체하세요.
+# 비워두면(미설정) Worker는 자동으로 D1만 사용합니다 — 배포가 깨지지 않습니다.
+PG_API_URL = "https://pg.cloud-press.co.kr"
 
 # 스택 정보: nginx + PHP-FPM 8.3 + MariaDB + Redis 7 (로컬, 무료)
 # GitHub Actions Secrets (provision 시 자동 등록):
