@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DB 관리 — wpspot 관리자</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div class="admin-banner">관리자 전용 영역</div>
+<div class="app-shell">
+  <div class="page-header">
+    <div class="page-breadcrumb">
+      <a href="/dashboard.html">wpspot</a>
+      <span class="page-breadcrumb__sep">›</span>
+      <span>DB 관리</span>
+    </div>
+    <h1 class="page-title">데이터베이스 관리</h1>
+  </div>
+
+  <div class="grid-2" style="gap:20px;">
+    <div class="info-card">
+      <div class="info-card__icon">🐘</div>
+      <div style="flex:1;">
+        <div class="info-card__header">메인 DB</div>
+        <div class="info-card__title">PostgreSQL <span id="pgStatusBadge" class="badge badge--grey">확인 중</span></div>
+        <div class="info-card__subtitle" id="pgSubtitle">상태를 불러오는 중…</div>
+      </div>
+    </div>
+    <div class="info-card">
+      <div class="info-card__icon">📦</div>
+      <div style="flex:1;">
+        <div class="info-card__header">서브(백업) DB</div>
+        <div class="info-card__title">Cloudflare D1 <span id="d1StatusBadge" class="badge badge--green">정상</span></div>
+        <div class="info-card__subtitle" id="d1Subtitle">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notice-box info" style="margin-top:16px;">
+    ℹ️ PostgreSQL은 GitHub Actions 러너 위에서 가동돼요(<code>postgres-keepalive.yml</code>). 별도 유료 서버 없이 운영되는 대신,
+    러너 롤링 교체 시 수 초~수십 초의 짧은 공백이 생길 수 있어요. 그 사이 쓰기는 D1에만 기록되고,
+    다음 정상화 시점부터 다시 Postgres에 미러링됩니다.
+  </div>
+
+  <div class="card" style="margin-top:20px;">
+    <div class="card-title" style="margin-bottom:16px;">테이블 조회 (Postgres, 최근 50건)</div>
+    <div class="field" style="max-width:280px;">
+      <select class="field__select" id="tableSelect">
+        <option value="users">users</option>
+        <option value="sites">sites</option>
+        <option value="site_jobs">site_jobs</option>
+        <option value="billing_invoices">billing_invoices</option>
+        <option value="payment_methods">payment_methods</option>
+        <option value="notices">notices</option>
+      </select>
+    </div>
+    <div id="tableArea" style="margin-top:16px;"></div>
+  </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script>
+  wpspot.requireAdmin();
+  wpspot.renderShell('admin-database', 'DB 관리');
+
+  function loadStatus() {
+    wpspot.api('/api/admin/database/status').then(data => {
+      const pg = data.postgres || {};
+      const pgBadge = document.getElementById('pgStatusBadge');
+      const pgSub = document.getElementById('pgSubtitle');
+      if (!pg.configured) {
+        pgBadge.textContent = '미설정';
+        pgBadge.className = 'badge badge--grey';
+        pgSub.textContent = 'wrangler.toml의 PG_API_URL과 PG_API_SECRET을 설정하면 활성화돼요.';
+      } else if (pg.online) {
+        pgBadge.textContent = '온라인';
+        pgBadge.className = 'badge badge--green';
+        pgSub.textContent = '정상적으로 응답하고 있어요.';
+      } else {
+        pgBadge.textContent = '오프라인';
+        pgBadge.className = 'badge badge--red';
+        pgSub.textContent = '러너 재기동 대기 중이거나 터널이 끊겼을 수 있어요. (최대 5분 내 자동 복구)';
+      }
+      document.getElementById('d1Subtitle').textContent = `테이블 ${data.d1?.tableCount ?? '—'}개`;
+    }).catch(e => wpspot.toast(e.message, 'error'));
+  }
+
+  function loadTable() {
+    const table = document.getElementById('tableSelect').value;
+    const area = document.getElementById('tableArea');
+    area.innerHTML = '<p style="color:var(--text-secondary);font-size:14px;">불러오는 중…</p>';
+    wpspot.api('/api/admin/database/tables/' + table).then(data => {
+      if (data.source === 'unconfigured') {
+        area.innerHTML = `<p style="color:var(--text-secondary);font-size:14px;">${wpspot.escapeHtml(data.message)}</p>`;
+        return;
+      }
+      const rows = data.rows || [];
+      if (!rows.length) {
+        area.innerHTML = '<p style="color:var(--text-secondary);font-size:14px;">데이터가 없어요.</p>';
+        return;
+      }
+      const cols = Object.keys(rows[0]).filter(c => !c.toLowerCase().includes('password') && !c.toLowerCase().includes('_enc'));
+      area.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr></thead>
+            <tbody>
+              ${rows.map(r => `<tr>${cols.map(c => `<td style="font-size:12px;">${wpspot.escapeHtml(String(r[c] ?? '—'))}</td>`).join('')}</tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    }).catch(e => {
+      area.innerHTML = `<p style="color:var(--text-secondary);font-size:14px;">${wpspot.escapeHtml(e.message)}</p>`;
+    });
+  }
+
+  document.getElementById('tableSelect').addEventListener('change', loadTable);
+  loadStatus();
+  loadTable();
+</script>
+</body>
+</html>
