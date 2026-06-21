@@ -149,6 +149,7 @@ const wpspot = (() => {
     "refresh-cw": '<path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>',
     "search": '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
     "shield": '<path d="M12 2 4 5v6c0 5 3.4 8.7 8 11 4.6-2.3 8-6 8-11V5l-8-3Z"/>',
+    "database": '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
     "trash-2": '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
     "plus": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
     "chevron-left": '<polyline points="15 18 9 12 15 6"/>',
@@ -172,7 +173,9 @@ const wpspot = (() => {
     const initials = (user?.displayName || user?.email || "?").trim().slice(0, 1).toUpperCase();
 
     const navItems = user?.isAdmin
-      ? [...NAV_ITEMS, { key: "admin-users", href: "/admin/users.html", icon: "shield", label: "관리자" }]
+      ? [...NAV_ITEMS,
+          { key: "admin-users", href: "/admin/users.html", icon: "shield", label: "관리자" },
+          { key: "admin-database", href: "/admin/database.html", icon: "database", label: "DB 관리" }]
       : NAV_ITEMS;
 
     const navHtml = navItems.map(item => `
