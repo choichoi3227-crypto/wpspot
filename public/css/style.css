@@ -1,4 +1,3 @@
-
 /* public/css/style.css — wpspot */
 @import url("tokens.css");
 
@@ -405,6 +404,7 @@ body.wps-has-shell .screen {
   transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 .tab-btn:hover { color: var(--text-primary); }
+.tab-btn:focus-visible { outline: 2px solid var(--fill-brand); outline-offset: -2px; }
 .tab-btn--active { color: var(--text-brand); border-bottom-color: var(--fill-brand); }
 
 /* =========================================================================
