@@ -6,6 +6,7 @@ import * as gh from "./github.js";
 import * as cf from "./cf.js";
 import { generateUsername, generatePassword } from "./credentials.js";
 import { slugify, initWpOptions } from "./utils.js";
+import { pgHealth, pgSelect, dualWriteInsert } from "./pg.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -241,7 +242,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
-      if (url.pathname.startsWith("/api/")) return await handleApi(request, env, url);
+      if (url.pathname.startsWith("/api/")) return await handleApi(request, env, url, ctx);
       return env.ASSETS.fetch(request);
     } catch (e) {
       console.error("Worker error:", e.message, e.stack);
@@ -250,7 +251,7 @@ export default {
   },
 };
 
-async function handleApi(request, env, url) {
+async function handleApi(request, env, url, ctx) {
   const { pathname } = url;
   const method = request.method;
 
@@ -263,9 +264,14 @@ async function handleApi(request, env, url) {
     const existing = await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first();
     if (existing) return err("이미 가입된 이메일입니다.", 409);
     const id = uid();
+    const passwordHash = await hashPassword(password);
     await env.DB.prepare(
       "INSERT INTO users (id,email,password_hash,display_name) VALUES (?,?,?,?)"
-    ).bind(id, email, await hashPassword(password), displayName || "").run();
+    ).bind(id, email, passwordHash, displayName || "").run();
+    // 메인 DB(Postgres)에도 비동기 미러 — 실패해도 가입 자체는 D1만으로 계속 진행됩니다.
+    if (ctx) ctx.waitUntil(dualWriteInsert(env, "users", {
+      id, email, password_hash: passwordHash, display_name: displayName || "",
+    }));
     const token = await signJWT({ sub: id, email }, env.JWT_SECRET);
     return json({ token, user: { id, email, displayName: displayName || "" } });
   }
@@ -436,7 +442,29 @@ async function handleApi(request, env, url) {
     return json({ ok: true });
   }
 
-  // ── 공지사항 ─────────────────────────────────────────────────────────────
+  if (pathname === "/api/admin/database/status" && method === "GET") {
+    if (!isAdmin) return err("관리자 권한이 필요합니다.", 403);
+    const pg = await pgHealth(env);
+    const d1Tables = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    ).all().catch(() => ({ results: [] }));
+    return json({
+      postgres: pg,
+      d1: { online: true, tableCount: d1Tables.results.length },
+    });
+  }
+
+  const adminDbTableMatch = pathname.match(/^\/api\/admin\/database\/tables\/([a-zA-Z_]+)$/);
+  if (adminDbTableMatch && method === "GET") {
+    if (!isAdmin) return err("관리자 권한이 필요합니다.", 403);
+    const table = adminDbTableMatch[1];
+    const res = await pgSelect(env, table, "limit=50&order=created_at.desc");
+    if (!res) return json({ source: "unconfigured", rows: [], message: "Postgres가 설정되지 않았어요 (PG_API_URL/PG_API_SECRET 미설정)." });
+    if (!res.ok) return err("Postgres에 연결할 수 없어요. 러너가 재기동 중일 수 있어요.", 502);
+    return json({ source: "postgres", rows: res.data });
+  }
+
+
 
   if (pathname === "/api/notices" && method === "GET") {
     const { results } = await env.DB.prepare(
@@ -601,6 +629,10 @@ async function handleApi(request, env, url) {
     await env.DB.prepare(
       "INSERT INTO sites (id,user_id,site_name,site_slug,status,plan) VALUES (?,?,?,?,'pending',?)"
     ).bind(id, userId, siteName.trim(), siteSlug, currentUser.plan || "light").run();
+    if (ctx) ctx.waitUntil(dualWriteInsert(env, "sites", {
+      id, user_id: userId, site_name: siteName.trim(), site_slug: siteSlug,
+      status: "pending", plan: currentUser.plan || "light",
+    }));
     return json({ id, siteName: siteName.trim(), siteSlug, status: "pending" });
   }
 
