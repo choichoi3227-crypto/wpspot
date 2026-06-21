@@ -1,0 +1,116 @@
+name: wpspot PostgreSQL Keep-Alive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# 구조: PostgreSQL 16 (메인 DB) + PostgREST (HTTP API) + cloudflared 터널
+# - D1은 서브(백업/캐시) — worker.js가 매 쓰기마다 비동기로 D1에도 기록합니다.
+# - 5개 job × 60초 offset → 매 60초 롤링 커버 (job 사이 끊김을 최소화)
+# - job timeout 8분 > cron 주기 5분 → 항상 overlap 3분
+#   ⚠️ 완전한 무중단은 아닙니다: GitHub Actions 잡은 강제 종료될 수 있고,
+#      롤링 offset 사이에 수 초~수십 초의 공백이 생길 수 있습니다.
+#      이 워크플로는 "서버 비용 없이 최대한 가동률을 높이는" 절충안입니다.
+# - 매 5분마다 pg_dump → gzip → git push (pg-backup/latest.sql.gz, DB 영속화)
+#
+# 필요한 Secrets: PG_PASS, PG_TUNNEL_TOKEN, PGRST_JWT_SECRET
+
+jobs:
+  pg-keepalive-0:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    env:
+      PG_PASS: ${{ secrets.PG_PASS }}
+      PG_TUNNEL_TOKEN: ${{ secrets.PG_TUNNEL_TOKEN }}
+      PGRST_JWT_SECRET: ${{ secrets.PGRST_JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Postgres + PostgREST + 터널 기동
+        run: bash scripts/pg-bootstrap.sh full
+      - name: DB 백업 + git push (영속화)
+        run: bash scripts/pg-bootstrap.sh backup
+      - name: 유지 (헬스체크 루프)
+        run: bash scripts/pg-bootstrap.sh loop
+
+  pg-keepalive-1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    env:
+      PG_PASS: ${{ secrets.PG_PASS }}
+      PG_TUNNEL_TOKEN: ${{ secrets.PG_TUNNEL_TOKEN }}
+      PGRST_JWT_SECRET: ${{ secrets.PGRST_JWT_SECRET }}
+    steps:
+      - name: Offset 60s
+        run: sleep 60
+      - uses: actions/checkout@v4
+      - name: Postgres + PostgREST + 터널 기동
+        run: bash scripts/pg-bootstrap.sh full
+      - name: DB 백업 + git push (영속화)
+        run: bash scripts/pg-bootstrap.sh backup
+      - name: 유지 (헬스체크 루프)
+        run: bash scripts/pg-bootstrap.sh loop
+
+  pg-keepalive-2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    env:
+      PG_PASS: ${{ secrets.PG_PASS }}
+      PG_TUNNEL_TOKEN: ${{ secrets.PG_TUNNEL_TOKEN }}
+      PGRST_JWT_SECRET: ${{ secrets.PGRST_JWT_SECRET }}
+    steps:
+      - name: Offset 120s
+        run: sleep 120
+      - uses: actions/checkout@v4
+      - name: Postgres + PostgREST + 터널 기동
+        run: bash scripts/pg-bootstrap.sh full
+      - name: DB 백업 + git push (영속화)
+        run: bash scripts/pg-bootstrap.sh backup
+      - name: 유지 (헬스체크 루프)
+        run: bash scripts/pg-bootstrap.sh loop
+
+  pg-keepalive-3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    env:
+      PG_PASS: ${{ secrets.PG_PASS }}
+      PG_TUNNEL_TOKEN: ${{ secrets.PG_TUNNEL_TOKEN }}
+      PGRST_JWT_SECRET: ${{ secrets.PGRST_JWT_SECRET }}
+    steps:
+      - name: Offset 180s
+        run: sleep 180
+      - uses: actions/checkout@v4
+      - name: Postgres + PostgREST + 터널 기동
+        run: bash scripts/pg-bootstrap.sh full
+      - name: DB 백업 + git push (영속화)
+        run: bash scripts/pg-bootstrap.sh backup
+      - name: 유지 (헬스체크 루프)
+        run: bash scripts/pg-bootstrap.sh loop
+
+  pg-keepalive-4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    env:
+      PG_PASS: ${{ secrets.PG_PASS }}
+      PG_TUNNEL_TOKEN: ${{ secrets.PG_TUNNEL_TOKEN }}
+      PGRST_JWT_SECRET: ${{ secrets.PGRST_JWT_SECRET }}
+    steps:
+      - name: Offset 240s
+        run: sleep 240
+      - uses: actions/checkout@v4
+      - name: Postgres + PostgREST + 터널 기동
+        run: bash scripts/pg-bootstrap.sh full
+      - name: DB 백업 + git push (영속화)
+        run: bash scripts/pg-bootstrap.sh backup
+      - name: 유지 (헬스체크 루프)
+        run: bash scripts/pg-bootstrap.sh loop
